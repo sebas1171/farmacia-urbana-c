@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "archivos.h"
+#include "inventario.h"
 
 static void stub_login(const char *usuario, const char *password) {
     if (usuario == NULL || password == NULL) {
@@ -12,19 +14,6 @@ static void stub_login(const char *usuario, const char *password) {
         printf("OK;login_correcto\n");
     } else {
         printf("ERROR;credenciales_invalidas\n");
-    }
-}
-
-static void stub_listar(Producto inventario[], int total) {
-    printf("OK;total=%d\n", total);
-    for (int i = 0; i < total; i++) {
-        printf("%d;%s;%.2f;%d;%s;%s\n",
-            inventario[i].id,
-            inventario[i].nombre,
-            inventario[i].precio,
-            inventario[i].stock,
-            inventario[i].lote,
-            inventario[i].fecha_vencimiento);
     }
 }
 
@@ -85,7 +74,77 @@ int main(int argc, char *argv[]) {
     if (strcmp(argv[1], "login") == 0) {
         stub_login(argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(argv[1], "listar") == 0) {
-        stub_listar(inventario, total);
+        listarProductos(inventario, total);
+    } else if (strcmp(argv[1], "registrar") == 0) {
+        if (argc != 8) {
+            printf("ERROR;uso_invalido\n");
+            return 1;
+        }
+        char *end = NULL;
+        errno = 0;
+        long id_l = strtol(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        end = NULL;
+        errno = 0;
+        float precio = strtof(argv[4], &end);
+        if (errno != 0 || end == argv[4] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        end = NULL;
+        errno = 0;
+        long stock_l = strtol(argv[5], &end, 10);
+        if (errno != 0 || end == argv[5] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        int id = (int)id_l;
+        int stock = (int)stock_l;
+        int r = registrarProducto(inventario, &total, id, argv[3], precio, stock, argv[6], argv[7]);
+        if (r == 0) {
+            printf("OK;registrado;id=%d\n", id);
+        } else {
+            printf("ERROR;registro_invalido\n");
+            return 1;
+        }
+    } else if (strcmp(argv[1], "editar") == 0) {
+        if (argc != 8) {
+            printf("ERROR;uso_invalido\n");
+            return 1;
+        }
+        char *end = NULL;
+        errno = 0;
+        long id_l = strtol(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        end = NULL;
+        errno = 0;
+        float precio = strtof(argv[4], &end);
+        if (errno != 0 || end == argv[4] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        end = NULL;
+        errno = 0;
+        long stock_l = strtol(argv[5], &end, 10);
+        if (errno != 0 || end == argv[5] || *end != '\0') {
+            printf("ERROR;parametros_invalidos\n");
+            return 1;
+        }
+        int id = (int)id_l;
+        int stock = (int)stock_l;
+        int r = editarProducto(inventario, total, id, argv[3], precio, stock, argv[6], argv[7]);
+        if (r == 0) {
+            printf("OK;editado;id=%d\n", id);
+        } else {
+            printf("ERROR;edicion_invalida\n");
+            return 1;
+        }
     } else if (strcmp(argv[1], "vender") == 0) {
         stub_vender(inventario, total, argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(argv[1], "alertas") == 0) {
