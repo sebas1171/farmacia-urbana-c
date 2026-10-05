@@ -3,8 +3,9 @@
 #include <string.h>
 #include <errno.h>
 #include "archivos.h"
+#include "archivos.h"
+#include "reportes.h"
 #include "inventario.h"
-
 static void stub_login(const char *usuario, const char *password) {
     if (usuario == NULL || password == NULL) {
         printf("ERROR;parametros_faltantes\n");
@@ -149,6 +150,11 @@ int main(int argc, char *argv[]) {
         stub_vender(inventario, total, argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(argv[1], "alertas") == 0) {
         stub_alertas(inventario, total);
+    } else if (strcmp(argv[1], "stock-minimo") == 0) {
+        int umbral = argc > 2 ? atoi(argv[2]) : STOCK_MINIMO_DEFAULT;
+        reporteStockMinimo(inventario, total, umbral);
+    } else if (strcmp(argv[1], "vencimientos") == 0) {
+        reporteVencimientos(inventario, total, argc > 2 ? argv[2] : "");
     } else {
         printf("ERROR;comando_no_reconocido\n");
         return 1;
