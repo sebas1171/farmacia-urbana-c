@@ -130,7 +130,7 @@ void listarProductos(Producto inventario[], int total) {
         return;
     }
     for (int i = 0; i < total; i++) {
-        printf("%d,%s,%.2f,%d,%s,%s\n",
+        printf("%d;%s;%.2f;%d;%s;%s\n",
                inventario[i].id,
                inventario[i].nombre,
                inventario[i].precio,

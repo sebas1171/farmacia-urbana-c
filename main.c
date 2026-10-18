@@ -75,7 +75,29 @@ int main(int argc, char *argv[]) {
     if (strcmp(argv[1], "login") == 0) {
         stub_login(argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
     } else if (strcmp(argv[1], "listar") == 0) {
+        printf("OK;total=%d\n", total);
         listarProductos(inventario, total);
+    } else if (strcmp(argv[1], "reporte") == 0) {
+        int alertas = 0;
+        float valorizado = 0.0f;
+        int stock_total = 0;
+        for (int i = 0; i < total; i++) {
+            valorizado += inventario[i].precio * inventario[i].stock;
+            stock_total += inventario[i].stock;
+            if (inventario[i].stock < 10) {
+                alertas++;
+            }
+        }
+        printf("OK;total=%d;alertas=%d;valorizado=%.2f;stock_total=%d\n",
+            total, alertas, valorizado, stock_total);
+        for (int i = 0; i < total; i++) {
+            if (inventario[i].stock < 10) {
+                printf("ALERTA;%d;%s;%d\n",
+                    inventario[i].id,
+                    inventario[i].nombre,
+                    inventario[i].stock);
+            }
+        }
     } else if (strcmp(argv[1], "registrar") == 0) {
         if (argc != 8) {
             printf("ERROR;uso_invalido\n");
