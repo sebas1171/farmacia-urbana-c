@@ -1,187 +1,53 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include "archivos.h"
-#include "archivos.h"
-#include "reportes.h"
-#include "inventario.h"
-static void stub_login(const char *usuario, const char *password) {
-    if (usuario == NULL || password == NULL) {
-        printf("ERROR;parametros_faltantes\n");
-        return;
-    }
-    if (strcmp(usuario, "admin") == 0 && strcmp(password, "1234") == 0) {
-        printf("OK;login_correcto\n");
-    } else {
-        printf("ERROR;credenciales_invalidas\n");
-    }
-}
-
-static void stub_vender(Producto inventario[], int total, const char *idStr, const char *cantStr) {
-    if (idStr == NULL || cantStr == NULL) {
-        printf("ERROR;parametros_faltantes\n");
-        return;
-    }
-    int id = atoi(idStr);
-    int cantidad = atoi(cantStr);
-    if (id <= 0 || cantidad <= 0) {
-        printf("ERROR;parametros_invalidos\n");
-        return;
-    }
-    int idx = buscarPorId(inventario, total, id);
-    if (idx < 0) {
-        printf("ERROR;producto_no_encontrado\n");
-        return;
-    }
-    if (inventario[idx].stock < cantidad) {
-        printf("ERROR;stock_insuficiente\n");
-        return;
-    }
-    inventario[idx].stock -= cantidad;
-    printf("OK;venta;id=%d;cantidad=%d;stock_restante=%d\n",
-        id, cantidad, inventario[idx].stock);
-}
-
-static void stub_alertas(Producto inventario[], int total) {
-    int n = 0;
-    for (int i = 0; i < total; i++) {
-        if (inventario[i].stock < 10) {
-            n++;
-        }
-    }
-    printf("OK;alertas=%d\n", n);
-    for (int i = 0; i < total; i++) {
-        if (inventario[i].stock < 10) {
-            printf("ALERTA;%d;%s;%d\n",
-                inventario[i].id,
-                inventario[i].nombre,
-                inventario[i].stock);
-        }
-    }
-}
 
 int main(int argc, char *argv[]) {
-    Producto inventario[MAX_PRODUCTOS];
-    int total = 0;
-
-    cargarDatos(inventario, &total);
-
     if (argc < 2) {
-        printf("ERROR;uso_invalido\n");
+        printf("ERROR;Comando_vacio\n");
         return 1;
     }
 
+    // Simulador de Andrea (Login)
     if (strcmp(argv[1], "login") == 0) {
-        stub_login(argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
-    } else if (strcmp(argv[1], "listar") == 0) {
-        printf("OK;total=%d\n", total);
-        listarProductos(inventario, total);
-    } else if (strcmp(argv[1], "reporte") == 0) {
-        int alertas = 0;
-        float valorizado = 0.0f;
-        int stock_total = 0;
-        for (int i = 0; i < total; i++) {
-            valorizado += inventario[i].precio * inventario[i].stock;
-            stock_total += inventario[i].stock;
-            if (inventario[i].stock < 10) {
-                alertas++;
-            }
-        }
-        printf("OK;total=%d;alertas=%d;valorizado=%.2f;stock_total=%d\n",
-            total, alertas, valorizado, stock_total);
-        for (int i = 0; i < total; i++) {
-            if (inventario[i].stock < 10) {
-                printf("ALERTA;%d;%s;%d\n",
-                    inventario[i].id,
-                    inventario[i].nombre,
-                    inventario[i].stock);
-            }
-        }
-    } else if (strcmp(argv[1], "registrar") == 0) {
-        if (argc != 8) {
-            printf("ERROR;uso_invalido\n");
-            return 1;
-        }
-        char *end = NULL;
-        errno = 0;
-        long id_l = strtol(argv[2], &end, 10);
-        if (errno != 0 || end == argv[2] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        end = NULL;
-        errno = 0;
-        float precio = strtof(argv[4], &end);
-        if (errno != 0 || end == argv[4] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        end = NULL;
-        errno = 0;
-        long stock_l = strtol(argv[5], &end, 10);
-        if (errno != 0 || end == argv[5] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        int id = (int)id_l;
-        int stock = (int)stock_l;
-        int r = registrarProducto(inventario, &total, id, argv[3], precio, stock, argv[6], argv[7]);
-        if (r == 0) {
-            printf("OK;registrado;id=%d\n", id);
-        } else {
-            printf("ERROR;registro_invalido\n");
-            return 1;
-        }
-    } else if (strcmp(argv[1], "editar") == 0) {
-        if (argc != 8) {
-            printf("ERROR;uso_invalido\n");
-            return 1;
-        }
-        char *end = NULL;
-        errno = 0;
-        long id_l = strtol(argv[2], &end, 10);
-        if (errno != 0 || end == argv[2] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        end = NULL;
-        errno = 0;
-        float precio = strtof(argv[4], &end);
-        if (errno != 0 || end == argv[4] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        end = NULL;
-        errno = 0;
-        long stock_l = strtol(argv[5], &end, 10);
-        if (errno != 0 || end == argv[5] || *end != '\0') {
-            printf("ERROR;parametros_invalidos\n");
-            return 1;
-        }
-        int id = (int)id_l;
-        int stock = (int)stock_l;
-        int r = editarProducto(inventario, total, id, argv[3], precio, stock, argv[6], argv[7]);
-        if (r == 0) {
-            printf("OK;editado;id=%d\n", id);
-        } else {
-            printf("ERROR;edicion_invalida\n");
-            return 1;
-        }
-    } else if (strcmp(argv[1], "vender") == 0) {
-        stub_vender(inventario, total, argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL);
-    } else if (strcmp(argv[1], "alertas") == 0) {
-        stub_alertas(inventario, total);
-    } else if (strcmp(argv[1], "stock-minimo") == 0) {
-        int umbral = argc > 2 ? atoi(argv[2]) : STOCK_MINIMO_DEFAULT;
-        reporteStockMinimo(inventario, total, umbral);
-    } else if (strcmp(argv[1], "vencimientos") == 0) {
-        reporteVencimientos(inventario, total, argc > 2 ? argv[2] : "");
-    } else {
-        printf("ERROR;comando_no_reconocido\n");
-        return 1;
+        printf("OK;ADMINISTRADOR;Sebastian\n");
+    }
+    // Simulador de Dariana (Inventario)
+    else if (strcmp(argv[1], "buscar_prod") == 0) {
+        printf("OK;MED-001;Paracetamol;5.50;100;2027-12-01\n");
+        printf("OK;MED-002;Ibuprofeno;7.20;50;2028-05-15\n");
+    }
+    // Simulador de Alertas
+    else if (strcmp(argv[1], "alertas") == 0) {
+        printf("OK;CRITICO;MED-003;Amoxicilina;2\n");
+        printf("OK;VENCE;MED-002;Ibuprofeno;2026-11-05\n");
+    }
+    // Simulador de Usuarios
+    else if (strcmp(argv[1], "listar_usuarios") == 0) {
+        printf("OK;72345678;Sebastian;admin;ADMINISTRADOR\n");
+        printf("OK;71112222;Paolo;pvendedor;VENDEDOR\n");
+    }
+    else if (strcmp(argv[1], "crear_usuario") == 0 || strcmp(argv[1], "editar_usuario") == 0 || strcmp(argv[1], "eliminar_usuario") == 0) {
+        printf("OK;Operacion_Exitosa\n");
+    }
+    // Simulador de Paolo (Ventas)
+    else if (strcmp(argv[1], "buscar_prod_codigo") == 0) {
+        printf("OK;Paracetamol;5.50;100\n");
+    }
+    else if (strcmp(argv[1], "procesar_venta") == 0) {
+        printf("OK;Venta_Guardada_Con_Exito\n");
+    }
+    // Simulador de Azumi (Reportes)
+    else if (strcmp(argv[1], "historial") == 0) {
+        printf("OK;2026-10-28;Paolo;Paracetamol;2;11.00\n");
+        printf("OK;2026-10-28;Andrea;Ibuprofeno;1;7.20\n");
+    }
+    // Simulador del Chatbot
+    else if (strcmp(argv[1], "chatbot") == 0) {
+        printf("OK;Hola, la conexion entre Python y C esta funcionando a la perfeccion.\n");
+    }
+    else {
+        printf("ERROR;Comando_no_reconocido\n");
     }
 
-    guardarDatos(inventario, total);
     return 0;
 }
