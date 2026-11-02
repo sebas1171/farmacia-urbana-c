@@ -27,4 +27,57 @@ int reporteStockMinimo(const Producto inventario[], int total, int umbral);
    Devuelve la cantidad de filas impresas. */
 int reporteVencimientos(const Producto inventario[], int total, const char *fecha_limite);
 
+/* Imprime el historial de ventas del periodo [fecha_inicio, fecha_fin]
+   (ambas en formato ISO "YYYY-MM-DD") y, opcionalmente, filtrado por vendedor.
+
+   Una linea por detalle de venta:
+
+       OK;FILA;<fecha_hora>;<vendedor>;<producto>;<cantidad>;<subtotal>
+
+   Si no se proporciona un ID de vendedor valido (NULL o vacio), se muestran
+   las ventas de todos los vendedores.
+
+   Si el periodo no tiene ventas:
+       OK;SIN_RESULTADOS
+
+   Si las fechas son invalidas o el rango es incorrecto:
+       ERROR;<motivo>
+
+   Devuelve la cantidad de filas impresas (0 si no hay resultados). */
+int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, const char *id_vendedor);
+
+/* Motor de alertas: imprime el resumen de alertas.
+
+   Formato:
+       OK;ALERTAS;BAJO_STOCK=<n_productos_stock_critico>;POR_VENCER=<n_productos_por_vencer>
+
+   BAJO_STOCK: cantidad de productos con stock <= STOCK_MINIMO_DEFAULT (10).
+   POR_VENCER: cantidad de productos con fecha_vencimiento >= CURRENT_DATE y
+              < CURRENT_DATE + INTERVAL '30 days' (vencen en menos de 30 dias).
+
+   Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
+int reporteAlertas(void);
+
+/* Imprime el producto mas vendido en el periodo [fecha_inicio, fecha_fin].
+
+   Formato:
+       OK;PRODUCTO_MAS_VENDIDO;<codigo>;<nombre>;<cantidad>
+
+   Si no hay ventas en el periodo:
+       OK;SIN_RESULTADOS
+
+   Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
+int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin);
+
+/* Imprime los ingresos totales del periodo [fecha_inicio, fecha_fin].
+
+   Formato:
+       OK;INGRESOS_TOTALES;<total>
+
+   Los ingresos se calculan con SUM(detalle_ventas.subtotal) y COALESCE para
+   evitar errores cuando no hay ventas/detalles.
+
+   Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
+int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin);
+
 #endif
