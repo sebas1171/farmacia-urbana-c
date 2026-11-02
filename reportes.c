@@ -72,6 +72,15 @@ static int idVendedorValido(const char *id) {
     return errno != ERANGE && valor > 0 && valor <= INT_MAX;
 }
 
+/* Valida el DNI del cliente: exactamente 8 digitos. */
+static int dniClienteValido(const char *dni) {
+    if (dni == NULL || strlen(dni) != 8) return 0;
+    for (int i = 0; i < 8; i++) {
+        if (!isdigit((unsigned char)dni[i])) return 0;
+    }
+    return 1;
+}
+
 int reporteStockMinimo(const Producto inventario[], int total, int umbral) {
     if (inventario == NULL || total <= 0) {
         return 0;
@@ -145,7 +154,8 @@ static PGconn *getConexion() {
     return conexion;
 }
 
-int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, const char *id_vendedor) {
+int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
+                           const char *id_vendedor, const char *dni_cliente) {
     if (fecha_inicio == NULL || fecha_fin == NULL ||
         !fechaValidaCalendario(fecha_inicio) || !fechaValidaCalendario(fecha_fin)) {
         printf("ERROR;Fecha_Invalida\n");
@@ -156,13 +166,16 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
         return -1;
     }
 
-    int usarFiltro = 0;
-    if (id_vendedor != NULL && strlen(id_vendedor) > 0) {
-        if (!idVendedorValido(id_vendedor)) {
-            printf("ERROR;ID_Vendedor_Invalido\n");
-            return -1;
-        }
-        usarFiltro = 1;
+    int usarFiltroVendedor = id_vendedor != NULL && strlen(id_vendedor) > 0;
+    int usarFiltroCliente = dni_cliente != NULL && strlen(dni_cliente) > 0;
+
+    if (usarFiltroVendedor && !idVendedorValido(id_vendedor)) {
+        printf("ERROR;ID_Vendedor_Invalido\n");
+        return -1;
+    }
+    if (usarFiltroCliente && !dniClienteValido(dni_cliente)) {
+        printf("ERROR;DNI_Cliente_Invalido\n");
+        return -1;
     }
 
     PGconn *conn = getConexion();
@@ -170,11 +183,34 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
         return -1;
     }
 
-    /* Rango inclusivo del primer día y exclusivo del día siguiente al último:
-       si la columna fecha_hora es TIMESTAMP, incluye todas las ventas del último
-       día seleccionado. */
     char sql[1024];
-    const char *filtro = usarFiltro ? " AND v.id_vendedor = $3::integer" : "";
+    char filtro[128] = "";
+    Oid paramTypes[4] = {25, 25, 0, 0};
+    const char *paramValues[4] = {fecha_inicio, fecha_fin, NULL, NULL};
+    int paramLengths[4] = {
+        (int)strlen(fecha_inicio), (int)strlen(fecha_fin), 0, 0
+    };
+    const int paramFormats[4] = {0, 0, 0, 0};
+    int nparams = 2;
+
+    if (usarFiltroVendedor) {
+        nparams++;
+        snprintf(filtro + strlen(filtro), sizeof(filtro) - strlen(filtro),
+                 " AND v.id_vendedor = $%d::integer", nparams);
+        paramTypes[nparams - 1] = 23;
+        paramValues[nparams - 1] = id_vendedor;
+        paramLengths[nparams - 1] = (int)strlen(id_vendedor);
+    }
+
+    if (usarFiltroCliente) {
+        nparams++;
+        snprintf(filtro + strlen(filtro), sizeof(filtro) - strlen(filtro),
+                 " AND v.dni_cliente = $%d", nparams);
+        paramTypes[nparams - 1] = 25;
+        paramValues[nparams - 1] = dni_cliente;
+        paramLengths[nparams - 1] = (int)strlen(dni_cliente);
+    }
+
     snprintf(sql, sizeof(sql),
         "SELECT TO_CHAR(v.fecha_hora, 'YYYY-MM-DD HH24:MI:SS'), u.nombre, p.nombre, dv.cantidad, dv.subtotal "
         "FROM ventas v "
@@ -185,21 +221,14 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
         "ORDER BY v.fecha_hora DESC, v.id DESC, dv.codigo_producto ASC",
         filtro);
 
-    const Oid paramTypes[3] = { 25, 25, 23 };
-    const char * const paramValues[3] = { fecha_inicio, fecha_fin, id_vendedor };
-    const int paramLengths[3] = { (int)strlen(fecha_inicio), (int)strlen(fecha_fin), (id_vendedor != NULL ? (int)strlen(id_vendedor) : 0) };
-    const int paramFormats[3] = { 0, 0, 0 };
-    int nparams = usarFiltro ? 3 : 2;
-    int resultFormat = 0;
-
-    PGresult *res = PQexecParams(conn, sql, nparams, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    PGresult *res = PQexecParams(conn, sql, nparams, paramTypes,
+                                 paramValues, paramLengths, paramFormats, 0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
-        fprintf(stderr, "ERROR;detalle_consulta_historial: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
+        fprintf(stderr, "ERROR;detalle_consulta_historial: %s\n",
+                res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_historial_fallida\n");
-        if (res != NULL) {
-            PQclear(res);
-        }
+        if (res != NULL) PQclear(res);
         PQfinish(conn);
         conexion = NULL;
         return -1;
@@ -222,7 +251,9 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
         const char *cantidad = PQgetvalue(res, i, 3);
         const char *subtotal = PQgetvalue(res, i, 4);
 
-        printf("OK;FILA;%s;%s;%s;%d;%.2f\n", fecha, vendedor, producto, atoi(cantidad), strtod(subtotal, NULL));
+        printf("OK;FILA;%s;%s;%s;%d;%.2f\n",
+               fecha, vendedor, producto, atoi(cantidad),
+               strtod(subtotal, NULL));
         impresos++;
     }
 
@@ -379,6 +410,98 @@ int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin) {
 
     /* COALESCE garantiza una fila con el total (0 si no hay ventas). */
     printf("OK;INGRESOS_TOTALES;%.2f\n", strtod(PQgetvalue(res, 0, 0), NULL));
+    PQclear(res);
+    PQfinish(conn);
+    conexion = NULL;
+    return 0;
+}
+
+/* --- Listado de productos con stock critico desde PostgreSQL --- */
+
+int reporteAlertasStock(void) {
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return -1;
+    }
+
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "SELECT codigo, nombre, stock "
+             "FROM productos WHERE stock <= %d "
+             "ORDER BY stock ASC, nombre ASC",
+             STOCK_MINIMO_DEFAULT);
+
+    PGresult *res = PQexec(conn, sql);
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "ERROR;detalle_alertas_stock: %s\n",
+                res != NULL ? PQerrorMessage(conn) : "sin resultado");
+        printf("ERROR;consulta_alertas_stock_fallida\n");
+        if (res != NULL) PQclear(res);
+        PQfinish(conn);
+        conexion = NULL;
+        return -1;
+    }
+
+    int filas = PQntuples(res);
+
+    if (filas == 0) {
+        printf("OK;SIN_RESULTADOS\n");
+    } else {
+        for (int i = 0; i < filas; i++) {
+            printf("OK;STOCK;%s;%s;%d\n",
+                   PQgetvalue(res, i, 0),
+                   PQgetvalue(res, i, 1),
+                   atoi(PQgetvalue(res, i, 2)));
+        }
+    }
+
+    PQclear(res);
+    PQfinish(conn);
+    conexion = NULL;
+    return 0;
+}
+
+/* --- Listado de productos proximos a vencer desde PostgreSQL --- */
+
+int reporteAlertasVencimientos(void) {
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT codigo, nombre, TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD') "
+        "FROM productos "
+        "WHERE fecha_vencimiento >= CURRENT_DATE "
+        "AND fecha_vencimiento < CURRENT_DATE + INTERVAL '30 days' "
+        "ORDER BY fecha_vencimiento ASC, nombre ASC";
+
+    PGresult *res = PQexec(conn, sql);
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "ERROR;detalle_alertas_vencimientos: %s\n",
+                res != NULL ? PQerrorMessage(conn) : "sin resultado");
+        printf("ERROR;consulta_alertas_vencimientos_fallida\n");
+        if (res != NULL) PQclear(res);
+        PQfinish(conn);
+        conexion = NULL;
+        return -1;
+    }
+
+    int filas = PQntuples(res);
+
+    if (filas == 0) {
+        printf("OK;SIN_RESULTADOS\n");
+    } else {
+        for (int i = 0; i < filas; i++) {
+            printf("OK;VENCIMIENTO;%s;%s;%s\n",
+                   PQgetvalue(res, i, 0),
+                   PQgetvalue(res, i, 1),
+                   PQgetvalue(res, i, 2));
+        }
+    }
+
     PQclear(res);
     PQfinish(conn);
     conexion = NULL;

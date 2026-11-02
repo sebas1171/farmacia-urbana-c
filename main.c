@@ -24,6 +24,16 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+    else if (strcmp(argv[1], "alertas_stock") == 0) {
+        if (reporteAlertasStock() != 0) {
+            return 1;
+        }
+    }
+    else if (strcmp(argv[1], "alertas_vencimientos") == 0) {
+        if (reporteAlertasVencimientos() != 0) {
+            return 1;
+        }
+    }
     // Simulador de Usuarios
     else if (strcmp(argv[1], "listar_usuarios") == 0) {
         printf("OK;72345678;Sebastian;admin;ADMINISTRADOR\n");
@@ -44,16 +54,23 @@ int main(int argc, char *argv[]) {
         char fecha_inicio[32] = "";
         char fecha_fin[32] = "";
         char id_vendedor[32] = "";
+        char dni_cliente[16] = "";
+
         if (argc > 2) {
             snprintf(fecha_inicio, sizeof(fecha_inicio), "%s", argv[2]);
         }
         if (argc > 3) {
             snprintf(fecha_fin, sizeof(fecha_fin), "%s", argv[3]);
         }
-        if (argc > 4) {
+        if (argc > 4 && strcmp(argv[4], "-") != 0) {
             snprintf(id_vendedor, sizeof(id_vendedor), "%s", argv[4]);
         }
-        if (reporteHistorialVentas(fecha_inicio, fecha_fin, id_vendedor) < 0) {
+        if (argc > 5) {
+            snprintf(dni_cliente, sizeof(dni_cliente), "%s", argv[5]);
+        }
+
+        if (reporteHistorialVentas(fecha_inicio, fecha_fin,
+                                   id_vendedor, dni_cliente) < 0) {
             return 1;
         }
     }
