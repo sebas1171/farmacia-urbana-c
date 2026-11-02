@@ -28,7 +28,7 @@ int reporteStockMinimo(const Producto inventario[], int total, int umbral);
 int reporteVencimientos(const Producto inventario[], int total, const char *fecha_limite);
 
 /* Imprime el historial de ventas del periodo [fecha_inicio, fecha_fin]
-   (ambas en formato ISO "YYYY-MM-DD") y, opcionalmente, filtrado por vendedor.
+   (ambas en formato ISO "YYYY-MM-DD") y, opcionalmente, filtrado por vendedor y/o cliente (DNI).
 
    Una linea por detalle de venta:
 
@@ -37,6 +37,9 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
    Si no se proporciona un ID de vendedor valido (NULL o vacio), se muestran
    las ventas de todos los vendedores.
 
+   Si no se proporciona un DNI de cliente valido (NULL o vacio), no se
+   aplica el filtro por cliente. Si se proporciona, debe tener 8 digitos.
+
    Si el periodo no tiene ventas:
        OK;SIN_RESULTADOS
 
@@ -44,7 +47,7 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
        ERROR;<motivo>
 
    Devuelve la cantidad de filas impresas (0 si no hay resultados). */
-int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, const char *id_vendedor);
+int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, const char *id_vendedor, const char *dni_cliente);
 
 /* Motor de alertas: imprime el resumen de alertas.
 
@@ -57,6 +60,8 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
 
    Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
 int reporteAlertas(void);
+int reporteAlertasStock(void);
+int reporteAlertasVencimientos(void);
 
 /* Imprime el producto mas vendido en el periodo [fecha_inicio, fecha_fin].
 
