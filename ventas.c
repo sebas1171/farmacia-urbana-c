@@ -4,12 +4,22 @@
 #include <libpq-fe.h>
 #include "ventas.h"
 
-// NOTA DE SEGURIDAD: Para producción, esto debería venir de variables de entorno (getenv).
-// Se mantiene hardcodeado temporalmente por compatibilidad estricta con el Docker local.
-const char *conninfo = "host=localhost port=5432 dbname=inventario_db user=farmacia_admin password=admin123";
+// 1. SEGURIDAD: Leer credenciales del entorno, con fallback SOLO para desarrollo local
+static const char* get_conninfo() {
+    const char* env_conn = getenv("FARMACIA_DB_URL");
+    if (env_conn != NULL && strlen(env_conn) > 0) {
+        return env_conn;
+    }
+    return "host=localhost port=5432 dbname=inventario_db user=farmacia_admin password=admin123";
+}
 
 void buscar_producto_venta(const char* codigo) {
-    PGconn *conn = PQconnectdb(conninfo);
+    if (!codigo || strlen(codigo) == 0) {
+        printf("ERROR;Codigo de producto invalido\n");
+        return;
+    }
+
+    PGconn *conn = PQconnectdb(get_conninfo());
     if (PQstatus(conn) != CONNECTION_OK) {
         printf("ERROR;Fallo conexion a BD: %s\n", PQerrorMessage(conn));
         PQfinish(conn);
@@ -32,50 +42,58 @@ void buscar_producto_venta(const char* codigo) {
 }
 
 void procesar_venta(const char* codigo, int cantidad, int id_vendedor, const char* dni_cliente) {
-    if (cantidad <= 0) {
-        printf("ERROR;La cantidad debe ser mayor a 0\n");
+    PGconn *conn = NULL;
+    PGresult *res = NULL;
+    PGresult *res_rollback = NULL;
+
+    // 2. VALIDACIÓN ESTRICTA DE ENTRADA
+    if (!codigo || strlen(codigo) == 0 || !dni_cliente || strlen(dni_cliente) == 0 || cantidad <= 0 || id_vendedor <= 0) {
+        printf("ERROR;Parametros de venta invalidos o cantidad cero\n");
         return;
     }
 
-    PGconn *conn = PQconnectdb(conninfo);
+    conn = PQconnectdb(get_conninfo());
     if (PQstatus(conn) != CONNECTION_OK) {
         printf("ERROR;Fallo conexion a BD: %s\n", PQerrorMessage(conn));
         PQfinish(conn);
         return;
     }
 
-    // 1. Iniciar Transacción ACID
-    PGresult *res = PQexec(conn, "BEGIN");
+    // INICIO DE TRANSACCIÓN
+    res = PQexec(conn, "BEGIN");
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         printf("ERROR;Fallo al iniciar transaccion: %s\n", PQerrorMessage(conn));
-        PQclear(res); PQfinish(conn); return;
+        goto cleanup_error;
     }
-    PQclear(res);
+    PQclear(res); res = NULL;
 
-    // 2. Bloquear la fila del producto (Previene Oversell / Race Conditions)
+    // BLOQUEO DE FILA (FOR UPDATE)
     const char *paramValues[1] = {codigo};
     res = PQexecParams(conn, "SELECT precio, stock FROM productos WHERE codigo = $1 FOR UPDATE", 1, NULL, paramValues, NULL, NULL, 0);
     
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0) {
+    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0) {
         printf("ERROR;Producto no encontrado o bloqueado\n");
-        PQexec(conn, "ROLLBACK");
-        if (res) PQclear(res);
-        PQfinish(conn);
-        return;
+        goto cleanup_rollback;
     }
 
-    double precio = atof(PQgetvalue(res, 0, 0));
-    int stock_actual = atoi(PQgetvalue(res, 0, 1));
-    PQclear(res);
+    // 3. CONVERSIÓN SEGURA (Validando que la BD no devuelva vacíos)
+    char *precio_raw = PQgetvalue(res, 0, 0);
+    char *stock_raw = PQgetvalue(res, 0, 1);
+    if (!precio_raw || !stock_raw || strlen(precio_raw) == 0 || strlen(stock_raw) == 0) {
+        printf("ERROR;Datos de BD corruptos (Null/Empty)\n");
+        goto cleanup_rollback;
+    }
+    
+    double precio = strtod(precio_raw, NULL);
+    int stock_actual = (int)strtol(stock_raw, NULL, 10);
+    PQclear(res); res = NULL;
 
     if (stock_actual < cantidad) {
         printf("ERROR;Stock insuficiente (Actual: %d)\n", stock_actual);
-        PQexec(conn, "ROLLBACK");
-        PQfinish(conn);
-        return;
+        goto cleanup_rollback;
     }
 
-    // 3. Descontar Stock
+    // ACTUALIZAR STOCK
     char cant_str[12];
     snprintf(cant_str, sizeof(cant_str), "%d", cantidad);
     const char *updateParams[2] = {cant_str, codigo};
@@ -83,12 +101,11 @@ void procesar_venta(const char* codigo, int cantidad, int id_vendedor, const cha
     
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         printf("ERROR;Fallo al actualizar stock: %s\n", PQerrorMessage(conn));
-        PQexec(conn, "ROLLBACK");
-        PQclear(res); PQfinish(conn); return;
+        goto cleanup_rollback;
     }
-    PQclear(res);
+    PQclear(res); res = NULL;
 
-    // 4. Registrar Venta (Para historial de Azumi)
+    // REGISTRAR VENTA (Cabecera)
     char vend_str[12], total_str[32];
     snprintf(vend_str, sizeof(vend_str), "%d", id_vendedor);
     snprintf(total_str, sizeof(total_str), "%.2f", precio * cantidad);
@@ -98,15 +115,15 @@ void procesar_venta(const char* codigo, int cantidad, int id_vendedor, const cha
     
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         printf("ERROR;Fallo al registrar venta: %s\n", PQerrorMessage(conn));
-        PQexec(conn, "ROLLBACK");
-        PQclear(res); PQfinish(conn); return;
+        goto cleanup_rollback;
     }
     
+    // 4. STRING SEGURO (snprintf garantiza el \0 y evita desbordamientos de strncpy)
     char id_venta[32];
-    strncpy(id_venta, PQgetvalue(res, 0, 0), sizeof(id_venta));
-    PQclear(res);
+    snprintf(id_venta, sizeof(id_venta), "%s", PQgetvalue(res, 0, 0));
+    PQclear(res); res = NULL;
 
-    // 5. Registrar Detalle de Venta
+    // REGISTRAR DETALLE
     char precio_str[32];
     snprintf(precio_str, sizeof(precio_str), "%.2f", precio);
     const char *detalleParams[5] = {id_venta, codigo, cant_str, precio_str, total_str};
@@ -115,19 +132,29 @@ void procesar_venta(const char* codigo, int cantidad, int id_vendedor, const cha
     
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         printf("ERROR;Fallo al registrar detalle: %s\n", PQerrorMessage(conn));
-        PQexec(conn, "ROLLBACK");
-        PQclear(res); PQfinish(conn); return;
+        goto cleanup_rollback;
     }
-    PQclear(res);
+    PQclear(res); res = NULL;
 
-    // 6. Confirmar Transacción
+    // CONFIRMAR TRANSACCIÓN
     res = PQexec(conn, "COMMIT");
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         printf("ERROR;Fallo al confirmar transaccion\n");
-        PQclear(res); PQfinish(conn); return;
+        goto cleanup_rollback;
     }
-    PQclear(res);
 
+    // CONTRATO IPC RESPETADO
     printf("OK;Venta procesada con exito;%s\n", id_venta);
-    PQfinish(conn);
+
+cleanup_error:
+    if (res) PQclear(res);
+    if (conn) PQfinish(conn);
+    return;
+
+cleanup_rollback:
+    // 5. LIMPIEZA TOTAL: Captura punteros perdidos y libera resultados del rollback
+    if (res) PQclear(res);
+    res_rollback = PQexec(conn, "ROLLBACK");
+    if (res_rollback) PQclear(res_rollback);
+    if (conn) PQfinish(conn);
 }
