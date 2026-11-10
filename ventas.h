@@ -1,8 +1,10 @@
 #ifndef VENTAS_H
 #define VENTAS_H
 
-#include "archivos.h"
+// Función para buscar producto por código
+void buscar_producto_venta(const char* codigo);
 
-void realizarVenta(Producto inventario[], int total, int id, int cantidad);
+// Función para procesar la compra (descontar stock y registrar)
+void procesar_venta(const char* codigo, int cantidad);
 
 #endif
