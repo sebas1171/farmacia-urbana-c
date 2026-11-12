@@ -211,14 +211,13 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
         paramLengths[nparams - 1] = (int)strlen(dni_cliente);
     }
 
+    /* Historial a nivel de venta (sin joins): una fila por boleta/venta. */
     snprintf(sql, sizeof(sql),
-        "SELECT TO_CHAR(v.fecha_hora, 'YYYY-MM-DD HH24:MI:SS'), u.nombre, p.nombre, dv.cantidad, dv.subtotal "
-        "FROM ventas v "
-        "INNER JOIN detalle_ventas dv ON dv.id_venta = v.id "
-        "INNER JOIN usuarios u ON u.id = v.id_vendedor "
-        "INNER JOIN productos p ON p.codigo = dv.codigo_producto "
+        "SELECT v.id, v.dni_cliente, "
+        "TO_CHAR(v.fecha_hora, 'YYYY-MM-DD HH24:MI:SS.MS'), v.total "
+        "FROM venta v "
         "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day')%s "
-        "ORDER BY v.fecha_hora DESC, v.id DESC, dv.codigo_producto ASC",
+        "ORDER BY v.fecha_hora DESC, v.id DESC",
         filtro);
 
     PGresult *res = PQexecParams(conn, sql, nparams, paramTypes,
@@ -245,15 +244,13 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
 
     int impresos = 0;
     for (int i = 0; i < filas; i++) {
-        const char *fecha = PQgetvalue(res, i, 0);
-        const char *vendedor = PQgetvalue(res, i, 1);
-        const char *producto = PQgetvalue(res, i, 2);
-        const char *cantidad = PQgetvalue(res, i, 3);
-        const char *subtotal = PQgetvalue(res, i, 4);
+        const char *id_venta = PQgetvalue(res, i, 0);
+        const char *dni_cliente = PQgetvalue(res, i, 1);
+        const char *fecha = PQgetvalue(res, i, 2);
+        const char *total = PQgetvalue(res, i, 3);
 
-        printf("OK;FILA;%s;%s;%s;%d;%.2f\n",
-               fecha, vendedor, producto, atoi(cantidad),
-               strtod(subtotal, NULL));
+        printf("OK;FILA;%s;%s;%s;%.2f\n",
+               id_venta, dni_cliente, fecha, strtod(total, NULL));
         impresos++;
     }
 
@@ -271,7 +268,7 @@ int reporteAlertas(void) {
         return -1;
     }
 
-    PGresult *res = PQexec(conn, "SELECT COUNT(*) FROM productos WHERE stock <= 10");
+    PGresult *res = PQexec(conn, "SELECT COUNT(*) FROM producto WHERE stock <= 10");
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_alertas: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_alertas_fallida\n");
@@ -285,7 +282,7 @@ int reporteAlertas(void) {
     int bajo_stock = atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
 
-    res = PQexec(conn, "SELECT COUNT(*) FROM productos "
+    res = PQexec(conn, "SELECT COUNT(*) FROM producto "
                        "WHERE fecha_vencimiento >= CURRENT_DATE "
                        "AND fecha_vencimiento < CURRENT_DATE + INTERVAL '30 days'");
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -326,13 +323,13 @@ int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin) {
         return -1;
     }
 
-    char sql[] = "SELECT p.codigo, p.nombre, SUM(dv.cantidad) AS total "
-                 "FROM ventas v "
-                 "INNER JOIN detalle_ventas dv ON dv.id_venta = v.id "
-                 "INNER JOIN productos p ON p.codigo = dv.codigo_producto "
+    char sql[] = "SELECT p.codigo_producto, p.nombre, SUM(dv.cantidad) AS total "
+                 "FROM venta v "
+                 "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
+                 "INNER JOIN producto p ON p.codigo_producto = dv.codigo_producto "
                  "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day') "
-                 "GROUP BY p.codigo, p.nombre "
-                 "ORDER BY total DESC, p.codigo ASC "
+                 "GROUP BY p.codigo_producto, p.nombre "
+                 "ORDER BY total DESC, p.codigo_producto ASC "
                  "LIMIT 1";
     const Oid paramTypes[] = { 25, 25 };
     const char * const paramValues[] = { fecha_inicio, fecha_fin };
@@ -387,8 +384,8 @@ int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin) {
     }
 
     char sql[] = "SELECT COALESCE(SUM(dv.subtotal), 0) AS total "
-                 "FROM ventas v "
-                 "INNER JOIN detalle_ventas dv ON dv.id_venta = v.id "
+                 "FROM venta v "
+                 "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
                  "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day')";
     const Oid paramTypes[] = { 25, 25 };
     const char * const paramValues[] = { fecha_inicio, fecha_fin };
@@ -426,8 +423,8 @@ int reporteAlertasStock(void) {
 
     char sql[256];
     snprintf(sql, sizeof(sql),
-             "SELECT codigo, nombre, stock "
-             "FROM productos WHERE stock <= %d "
+             "SELECT codigo_producto, nombre, stock "
+             "FROM producto WHERE stock <= %d "
              "ORDER BY stock ASC, nombre ASC",
              STOCK_MINIMO_DEFAULT);
 
@@ -471,8 +468,8 @@ int reporteAlertasVencimientos(void) {
     }
 
     const char *sql =
-        "SELECT codigo, nombre, TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD') "
-        "FROM productos "
+        "SELECT codigo_producto, nombre, TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD') "
+        "FROM producto "
         "WHERE fecha_vencimiento >= CURRENT_DATE "
         "AND fecha_vencimiento < CURRENT_DATE + INTERVAL '30 days' "
         "ORDER BY fecha_vencimiento ASC, nombre ASC";

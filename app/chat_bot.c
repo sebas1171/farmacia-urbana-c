@@ -35,7 +35,7 @@ void procesar_chatbot(const char *pregunta) {
         char medicamento[100] = "";
         
         // Un parser sencillo para extraer el término posterior a "stock"
-        // Ejemplo: "stock paracetamol" -> extrae "paracetamol"
+        // Ejemplo: "stock ibuprofeno" -> extrae "ibuprofeno"
         if (ptr != NULL) {
             // Avanzar después de la palabra "stock"
             ptr += 5;

@@ -10,9 +10,13 @@ Backend: binario C ./farmacia, IPC normalizada por integracion_ipc.ConexionC.
 
 from __future__ import annotations
 
-import customtkinter as ctk
+import datetime
+import os
+from pathlib import Path
 from tkinter import ttk
 from typing import Callable
+
+import customtkinter as ctk
 
 from integracion_ipc import ConexionC
 
@@ -162,6 +166,9 @@ class VistaInventario(ctk.CTkFrame):
         )
         self.lbl_estado.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
 
+        # Al abrir la vista se carga el inventario inicial (primeros 200 productos).
+        self._on_buscar()
+
     # -- Estilo Treeview para tema oscuro de CustomTkinter --
     def _configurar_estilo_treeview(self) -> None:
         estilo = ttk.Style()
@@ -234,10 +241,11 @@ class VistaVentas(ctk.CTkFrame):
         top.grid_columnconfigure(0, weight=1)
         top.grid_columnconfigure(1, weight=0)
 
-        self.entry_codigo = ctk.CTkEntry(
-            top, placeholder_text="Código del producto (ej. MED-001)"
-        )
+        # Combo editable: el usuario escribe y las sugerencias se llenan
+        # dinámicamente desde el backend (sin listas hardcodeadas).
+        self.entry_codigo = ctk.CTkComboBox(top, values=[], width=360)
         self.entry_codigo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.entry_codigo.bind("<KeyRelease>", self._on_buscar_sugerencias)
         self.entry_cantidad = ctk.CTkEntry(top, placeholder_text="1", width=100)
         self.entry_cantidad.grid(row=0, column=1)
         self.btn_agregar = ctk.CTkButton(
@@ -321,9 +329,37 @@ class VistaVentas(ctk.CTkFrame):
             background=[("active", "#3F3F4B")],
         )
 
+    # -- Autocomplete: actualiza el desplegable con los nombres del backend --
+    def _on_buscar_sugerencias(self, _event=None) -> None:
+        termino = self.entry_codigo.get().strip()
+
+        # Con 2 letras o menos no se consulta la base de datos.
+        if len(termino) <= 2:
+            self.entry_codigo.configure(values=[])
+            return
+
+        respuesta = ConexionC.ejecutar("buscar_prod", termino)
+        if respuesta.get("status") != "OK":
+            self.entry_codigo.configure(values=[])
+            return
+
+        nombres: list[str] = []
+        # Contrato buscar_prod: [[Código, Nombre, Precio, Stock, Vencimiento], ...]
+        for fila in respuesta.get("data") or []:
+            if len(fila) > 1:
+                nombre = str(fila[1]).strip()
+                if nombre and nombre not in nombres:
+                    nombres.append(nombre)
+
+        self.entry_codigo.configure(values=nombres)
+
     # -- Zona superior: agregar al carrito --
     def _on_agregar(self) -> None:
-        codigo = self.entry_codigo.get().strip()
+        termino = self.entry_codigo.get().strip()
+        if not termino:
+            self.lbl_error.configure(text="Ingrese el nombre o código del producto.")
+            return
+
         try:
             cantidad = int(float(self.entry_cantidad.get().strip() or 1))
         except ValueError:
@@ -332,7 +368,8 @@ class VistaVentas(ctk.CTkFrame):
             self.lbl_error.configure(text="Cantidad inválida.")
             return
 
-        respuesta = ConexionC.ejecutar("buscar_prod_codigo", codigo)
+        # Búsqueda flexible: acepta nombre parcial o código (comando buscar_prod).
+        respuesta = ConexionC.ejecutar("buscar_prod", termino)
 
         if respuesta.get("status") != "OK":
             mensaje = respuesta.get("mensaje") or "Producto no encontrado."
@@ -340,11 +377,12 @@ class VistaVentas(ctk.CTkFrame):
             return
 
         data = respuesta.get("data") or []
-        # Contrato: data = [[Nombre, Precio, Stock]] -> tomamos la primera fila
+        # Contrato buscar_prod: [[Código, Nombre, Precio, Stock, Vencimiento], ...]
         fila = data[0] if len(data) > 0 else []
-        nombre = str(fila[0]) if len(fila) > 0 else codigo
+        codigo = str(fila[0]).strip() if len(fila) > 0 else termino
+        nombre = str(fila[1]).strip() if len(fila) > 1 else termino
         try:
-            precio = float(fila[1]) if len(fila) > 1 else 0.0
+            precio = float(fila[2]) if len(fila) > 2 else 0.0
         except (ValueError, IndexError):
             precio = 0.0
         subtotal = round(precio * cantidad, 2)
@@ -359,6 +397,10 @@ class VistaVentas(ctk.CTkFrame):
 
     # -- Zona inferior: procesar venta --
     def _on_procesar(self) -> None:
+        self.lbl_error.configure(text="")
+        self.lbl_exito.configure(text="")
+
+        filas: list[tuple[str, ...]] = []
         items: list[str] = []
         for item in self.tree.get_children():
             v = self.tree.item(item, "values")
@@ -367,21 +409,109 @@ class VistaVentas(ctk.CTkFrame):
                 cantidad = int(float(str(v[3]).strip()))
             except (ValueError, IndexError):
                 continue
+            filas.append(tuple(str(valor) for valor in v))
             items.append(f"{codigo},{cantidad}")
 
+        if not items:
+            self.lbl_error.configure(text="El carrito está vacío.")
+            return
+
+        total_venta = self._calcular_total()
         carrito = "|".join(items)
         dni = self.entry_dni.get().strip()
 
         respuesta = ConexionC.ejecutar("procesar_venta", dni, carrito)
 
         if respuesta.get("status") == "OK":
+            # Respuesta del backend: OK;VENTA;<id>;<total>
+            # Se genera físicamente boleta_<id>.txt con fecha, DNI y detalles.
+            id_venta = self._extraer_id_venta(respuesta)
+            total_backend = self._extraer_total_venta(respuesta)
+            total_boleta = total_backend if total_backend is not None else total_venta
+            ruta_boleta = self._generar_boleta(id_venta, filas, dni, total_boleta)
             self.tree.delete(*self.tree.get_children())
             self.lbl_total.configure(text="TOTAL: S/ 0.00")
-            self.lbl_exito.configure(text="Venta Exitosa")
+            self.lbl_exito.configure(
+                text=f"Venta exitosa. Boleta #{id_venta} impresa ({ruta_boleta.name})."
+            )
             self.lbl_error.configure(text="")
         else:
             mensaje = respuesta.get("mensaje") or "No se pudo procesar la venta."
             self.lbl_error.configure(text=f"Error: {mensaje}")
+
+    @staticmethod
+    def _extraer_id_venta(respuesta: dict) -> str:
+        """Obtiene el ID de la fila OK;VENTA;<id>;<total> del backend.
+
+        Soporta tanto la respuesta cruda con tag (["VENTA", id, total])
+        como la respuesta ya normalizada por ConexionC (["id", total]).
+        """
+        for fila in respuesta.get("data") or []:
+            valores = [str(v).strip() for v in fila]
+            if not valores:
+                continue
+            if valores[0].upper() == "VENTA":
+                valores = valores[1:]
+            if valores and valores[0].isdigit():
+                return valores[0]
+        # Respaldo: identificador único basado en la fecha/hora actual.
+        return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+    @staticmethod
+    def _extraer_total_venta(respuesta: dict) -> float | None:
+        """Obtiene el total de OK;VENTA;<id>;<total> si el backend lo envía."""
+        for fila in respuesta.get("data") or []:
+            valores = [str(v).strip() for v in fila]
+            if not valores:
+                continue
+            if valores[0].upper() == "VENTA":
+                valores = valores[1:]
+            if len(valores) > 1:
+                try:
+                    return float(valores[1])
+                except ValueError:
+                    return None
+        return None
+
+    def _generar_boleta(
+        self,
+        id_venta: str,
+        filas: list[tuple[str, ...]],
+        dni: str,
+        total: float,
+    ) -> Path:
+        """Escribe el resumen de la compra en boleta_<id>.txt (texto plano)."""
+        ruta = Path(__file__).resolve().parent / f"boleta_{id_venta}.txt"
+        fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lineas = [
+            "=" * 48,
+            "            FARMACIA URBANA",
+            "         BOLETA DE VENTA ELECTRONICA",
+            "=" * 48,
+            f"Boleta N°: {id_venta}",
+            f"Fecha: {fecha}",
+            f"DNI cliente: {dni or '-'}",
+            "-" * 48,
+            f"{'Codigo':<12}{'Producto':<20}{'Cant.':>6}{'Subtotal':>10}",
+            "-" * 48,
+        ]
+        for fila in filas:
+            codigo = fila[0] if len(fila) > 0 else ""
+            nombre = fila[1] if len(fila) > 1 else ""
+            cantidad = fila[3] if len(fila) > 3 else ""
+            subtotal = fila[4] if len(fila) > 4 else "0.00"
+            lineas.append(f"{codigo:<12}{nombre[:19]:<20}{cantidad:>6}{subtotal:>10}")
+
+        lineas += [
+            "-" * 48,
+            f"TOTAL: S/ {total:.2f}",
+            "=" * 48,
+            "Gracias por su compra.",
+            "",
+        ]
+        ruta.write_text("\n".join(lineas), encoding="utf-8")
+        return ruta
 
     # -- Helpers --
     def _calcular_total(self) -> float:
@@ -401,13 +531,12 @@ class VistaVentas(ctk.CTkFrame):
 class VistaReportes(ctk.CTkFrame):
     """Vista de reportes: historial de ventas filtrado por fechas."""
 
-    COLUMNAS = ("Fecha", "Vendedor", "Producto", "Cantidad", "Subtotal")
+    COLUMNAS = ("ID Venta", "DNI Cliente", "Fecha y Hora Exacta", "Total")
     ANCHOS = {
-        "Fecha": 100,
-        "Vendedor": 120,
-        "Producto": 150,
-        "Cantidad": 80,
-        "Subtotal": 90,
+        "ID Venta": 90,
+        "DNI Cliente": 130,
+        "Fecha y Hora Exacta": 220,
+        "Total": 100,
     }
 
     def __init__(self, master: ctk.CTk) -> None:
@@ -433,6 +562,18 @@ class VistaReportes(ctk.CTkFrame):
             top, placeholder_text="Fecha Fin (YYYY-MM-DD)"
         )
         self.entry_fecha_fin.grid(row=0, column=1, sticky="e")
+
+        # Por defecto: primer y último día del mes actual.
+        hoy = datetime.date.today()
+        primer_dia = hoy.replace(day=1)
+        siguiente_mes = (
+            primer_dia.replace(year=primer_dia.year + 1, month=1)
+            if primer_dia.month == 12
+            else primer_dia.replace(month=primer_dia.month + 1)
+        )
+        ultimo_dia = siguiente_mes - datetime.timedelta(days=1)
+        self.entry_fecha_inicio.insert(0, primer_dia.isoformat())
+        self.entry_fecha_fin.insert(0, ultimo_dia.isoformat())
 
         self.btn_generar = ctk.CTkButton(
             top, text="Generar Historial", command=self._on_generar
@@ -508,6 +649,7 @@ class VistaReportes(ctk.CTkFrame):
     def _on_generar(self) -> None:
         fecha_inicio = self.entry_fecha_inicio.get().strip()
         fecha_fin = self.entry_fecha_fin.get().strip()
+        self.lbl_error.configure(text="")
 
         respuesta = ConexionC.ejecutar("historial", fecha_inicio, fecha_fin)
 
@@ -517,6 +659,7 @@ class VistaReportes(ctk.CTkFrame):
             for fila in datos:
                 self.tree.insert("", "end", values=self._normalizar_fila(fila))
         else:
+            self.tree.delete(*self.tree.get_children())
             self.lbl_error.configure(
                 text=f"Error: {respuesta.get('mensaje') or 'No se generó el historial.'}"
             )
@@ -794,11 +937,11 @@ class VentanaChatbot(ctk.CTkToplevel):
 # VistaUsuarios (CRUD de usuarios)
 # ===========================================================================
 class VistaUsuarios(ctk.CTkFrame):
-    """Vista CRUD de usuarios: formulario (DNI/Nombre/Username/Password/Rol) + tabla."""
+    """Vista CRUD de usuarios: formulario (ID/Nombre/Username/Password/Rol) + tabla."""
 
-    COLUMNAS = ("DNI", "Nombre", "Username", "Rol")
-    ANCHOS = {"DNI": 90, "Nombre": 150, "Username": 120, "Rol": 90}
-    ROLES = ("ADMINISTRADOR", "TECNICO", "VENDEDOR")
+    COLUMNAS = ("ID", "Nombre", "Username", "Rol")
+    ANCHOS = {"ID": 70, "Nombre": 180, "Username": 140, "Rol": 100}
+    ROLES = ("ADMIN", "VENDEDOR")
 
     def __init__(self, master: ctk.CTk) -> None:
         super().__init__(master, fg_color="transparent")
@@ -814,8 +957,12 @@ class VistaUsuarios(ctk.CTkFrame):
             zona, text="Gestión de Usuarios", font=ctk.CTkFont(size=20, weight="bold")
         ).grid(row=0, column=0, sticky="w")
 
-        self.entry_dni = ctk.CTkEntry(zona, placeholder_text="DNI", width=150)
-        self.entry_dni.grid(row=1, column=0, sticky="w")
+        # ID numérico del usuario (clave de la tabla `usuarios`). Se usa para
+        # editar el rol o eliminar; no se envía al crear porque lo genera la BD.
+        self.entry_id = ctk.CTkEntry(
+            zona, placeholder_text="ID (para editar/eliminar)", width=180
+        )
+        self.entry_id.grid(row=1, column=0, sticky="w")
         self.entry_nombre = ctk.CTkEntry(zona, placeholder_text="Nombre", width=180)
         self.entry_nombre.grid(row=2, column=0, sticky="w")
         self.entry_username = ctk.CTkEntry(zona, placeholder_text="Username", width=160)
@@ -859,9 +1006,20 @@ class VistaUsuarios(ctk.CTkFrame):
             self.tree.heading(col, text=col, anchor="w")
             self.tree.column(col, width=self.ANCHOS[col], anchor="w")
         self._configurar_estilo_treeview()
+        self.tree.bind("<<TreeviewSelect>>", self._on_seleccionar)
 
         # Al iniciar: cargar usuarios desde el backend C
         self._cargar_usuarios()
+
+    def _on_seleccionar(self, _event=None) -> None:
+        """Copia el ID de la fila seleccionada al formulario."""
+        seleccion = self.tree.selection()
+        if not seleccion:
+            return
+        valores = self.tree.item(seleccion[0], "values")
+        if valores:
+            self.entry_id.delete(0, "end")
+            self.entry_id.insert(0, str(valores[0]))
 
     # -- Estilo Treeview (mismo tema oscuro que VistaInventario) --
     def _configurar_estilo_treeview(self) -> None:
@@ -894,12 +1052,16 @@ class VistaUsuarios(ctk.CTkFrame):
 
     # -- Carga inicial: listar_usuarios -> tabla --
     def _cargar_usuarios(self) -> None:
+        # Se limpia la tabla ANTES de insertar para que el refresco visual sea
+        # inmediato al crear, editar o eliminar un usuario.
+        self.tree.delete(*self.tree.get_children())
+
         respuesta = ConexionC.ejecutar("listar_usuarios")
         if respuesta.get("status") == "OK":
             datos = respuesta.get("data") or []
-            self.tree.delete(*self.tree.get_children())
             for fila in datos:
                 self.tree.insert("", "end", values=self._normalizar_fila(fila))
+            self.tree.update_idletasks()
             self.lbl_error.configure(text="")
         else:
             mensaje = respuesta.get("mensaje") or "No se pudieron cargar los usuarios."
@@ -913,17 +1075,18 @@ class VistaUsuarios(ctk.CTkFrame):
 
     # -- Registrar usuario --
     def _on_registrar(self) -> None:
-        dni = self.entry_dni.get().strip()
         nombre = self.entry_nombre.get().strip()
         user = self.entry_username.get().strip()
         pasw = self.entry_password.get()
         rol = self.option_rol.get()
 
-        if not dni or not nombre or not user or not pasw or not rol:
+        if not nombre or not user or not pasw or not rol:
             self.lbl_error.configure(text="Complete todos los campos.")
             return
 
-        respuesta = ConexionC.ejecutar("crear_usuario", dni, nombre, user, pasw, rol)
+        # main.c espera exactamente:
+        #   crear_usuario <nombre> <username> <password> <rol>
+        respuesta = ConexionC.ejecutar("crear_usuario", nombre, user, pasw, rol)
 
         if respuesta.get("status") == "OK":
             self.lbl_error.configure(text="")
@@ -934,14 +1097,18 @@ class VistaUsuarios(ctk.CTkFrame):
 
     # -- Actualizar rol --
     def _on_actualizar_rol(self) -> None:
-        dni = self.entry_dni.get().strip()
+        id_usuario = self.entry_id.get().strip()
         rol = self.option_rol.get()
 
-        if not dni or not rol:
-            self.lbl_error.configure(text="Ingrese el DNI y seleccione un rol.")
+        if not id_usuario or not rol:
+            self.lbl_error.configure(text="Ingrese el ID y seleccione un rol.")
+            return
+        if not id_usuario.isdigit():
+            self.lbl_error.configure(text="El ID debe ser numérico.")
             return
 
-        respuesta = ConexionC.ejecutar("editar_usuario", dni, rol)
+        # main.c espera exactamente: editar_usuario <id> <rol>
+        respuesta = ConexionC.ejecutar("editar_usuario", id_usuario, rol)
 
         if respuesta.get("status") == "OK":
             self.lbl_error.configure(text="")
@@ -952,13 +1119,17 @@ class VistaUsuarios(ctk.CTkFrame):
 
     # -- Eliminar usuario --
     def _on_eliminar(self) -> None:
-        dni = self.entry_dni.get().strip()
+        id_usuario = self.entry_id.get().strip()
 
-        if not dni:
-            self.lbl_error.configure(text="Ingrese el DNI del usuario a eliminar.")
+        if not id_usuario:
+            self.lbl_error.configure(text="Ingrese el ID del usuario a eliminar.")
+            return
+        if not id_usuario.isdigit():
+            self.lbl_error.configure(text="El ID debe ser numérico.")
             return
 
-        respuesta = ConexionC.ejecutar("eliminar_usuario", dni)
+        # main.c espera exactamente: eliminar_usuario <id>
+        respuesta = ConexionC.ejecutar("eliminar_usuario", id_usuario)
 
         if respuesta.get("status") == "OK":
             self.lbl_error.configure(text="")
@@ -991,10 +1162,13 @@ class FarmaciaApp(ctk.CTk):
 
     def mostrar_login(self) -> None:
         self.usuario_actual = None
+        os.environ.pop("FARMACIA_USER", None)
         self._cambiar_frame(LoginFrame(self, on_success=self.mostrar_dashboard))
 
     def mostrar_dashboard(self, usuario: str) -> None:
         self.usuario_actual = usuario
+        # El backend C usa esta variable para resolver venta.id_vendedor.
+        os.environ["FARMACIA_USER"] = usuario
         self._cambiar_frame(
             DashboardFrame(self, usuario=usuario, on_logout=self.mostrar_login)
         )

@@ -233,29 +233,31 @@ void buscarProductos(const char *texto) {
         return;
     }
 
-    if (texto == NULL || strlen(texto) == 0) {
-        printf("ERROR;Producto_No_Encontrado\n");
-        return;
-    }
+    /* Texto vacío (o NULL) no es un error: se usa la cadena vacía como
+       comodín para devolver el inventario inicial (primeros 200 productos). */
+    const char *termino = (texto == NULL) ? "" : texto;
 
-    /* Patrón con comodines para la búsqueda por ILIKE, pasado como parámetro. */
-    char pattern[512];
-    snprintf(pattern, sizeof(pattern), "%%%s%%", texto);
+    /* El patrón se compone directamente en SQL: ILIKE '%' || $1 || '%'. */
     const Oid paramTypes[] = { 25 }; /* OID de text */
-    const int paramLengths[] = { (int)strlen(pattern) };
-    const char *paramValues[] = { pattern };
+    const int paramLengths[] = { (int)strlen(termino) };
+    const char *paramValues[] = { termino };
     const int paramFormats[] = { 0 };
     int resultFormat = 0;
 
     /* La fecha se obtiene como texto via TO_CHAR con formato YYYY-MM-DD,
        de modo que PostgreSQL valida el tipo DATE antes de devolverla. */
-    char sql[] = "SELECT codigo, nombre, precio, stock, TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD') "
-                 "FROM productos WHERE codigo ILIKE $1 OR nombre ILIKE $1";
+    char sql[] = "SELECT codigo_producto, nombre, precio, stock, "
+                 "COALESCE(TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD'), '') "
+                 "FROM producto "
+                 "WHERE codigo_producto ILIKE '%' || $1 || '%' OR nombre ILIKE '%' || $1 || '%' "
+                 "ORDER BY nombre ASC LIMIT 200";
     PGresult *res = PQexecParams(conn, sql, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
 
-    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;consulta_productos_fallida\n");
-        PQclear(res);
+        if (res != NULL) {
+            PQclear(res);
+        }
         return;
     }
 

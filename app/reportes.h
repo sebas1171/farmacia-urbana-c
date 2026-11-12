@@ -30,9 +30,11 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
 /* Imprime el historial de ventas del periodo [fecha_inicio, fecha_fin]
    (ambas en formato ISO "YYYY-MM-DD") y, opcionalmente, filtrado por vendedor y/o cliente (DNI).
 
-   Una linea por detalle de venta:
+   Una linea por venta (boleta), consultando solo la tabla `venta`:
 
-       OK;FILA;<fecha_hora>;<vendedor>;<producto>;<cantidad>;<subtotal>
+       OK;FILA;<id_venta>;<dni_cliente>;<fecha_hora_con_ms>;<total>
+
+   La fecha se emite como YYYY-MM-DD HH24:MI:SS.MS (con milisegundos).
 
    Si no se proporciona un ID de vendedor valido (NULL o vacio), se muestran
    las ventas de todos los vendedores.

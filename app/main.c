@@ -1,7 +1,28 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 
 #include "reportes.h"
+#include "usuarios.h"
+#include "inventario.h"
+#include "ventas.h"
+
+/* Convierte un argumento a entero positivo. Devuelve 0 si es invalido. */
+static int parsearId(const char *texto) {
+    if (texto == NULL || texto[0] == '\0') {
+        return 0;
+    }
+    errno = 0;
+    char *fin = NULL;
+    long valor = strtol(texto, &fin, 10);
+    if (errno == ERANGE || fin == texto || *fin != '\0' ||
+        valor <= 0 || valor > INT_MAX) {
+        return 0;
+    }
+    return (int)valor;
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -13,10 +34,9 @@ int main(int argc, char *argv[]) {
     if (strcmp(argv[1], "login") == 0) {
         printf("OK;ADMINISTRADOR;Sebastian\n");
     }
-    // Simulador de Dariana (Inventario)
+    // Inventario: busqueda real en PostgreSQL (alimenta el autocomplete de Ventas)
     else if (strcmp(argv[1], "buscar_prod") == 0) {
-        printf("OK;MED-001;Paracetamol;5.50;100;2027-12-01\n");
-        printf("OK;MED-002;Ibuprofeno;7.20;50;2028-05-15\n");
+        buscarProductos(argc > 2 ? argv[2] : "");
     }
     // Motor de Alertas (Reportes)
     else if (strcmp(argv[1], "alertas") == 0) {
@@ -34,20 +54,61 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    // Simulador de Usuarios
+    // Usuarios (CRUD real contra PostgreSQL, tabla `usuarios`)
     else if (strcmp(argv[1], "listar_usuarios") == 0) {
-        printf("OK;72345678;Sebastian;admin;ADMINISTRADOR\n");
-        printf("OK;71112222;Paolo;pvendedor;VENDEDOR\n");
+        listarUsuarios();
     }
-    else if (strcmp(argv[1], "crear_usuario") == 0 || strcmp(argv[1], "editar_usuario") == 0 || strcmp(argv[1], "eliminar_usuario") == 0) {
-        printf("OK;Operacion_Exitosa\n");
+    else if (strcmp(argv[1], "crear_usuario") == 0) {
+        /* Formato vigente: crear_usuario <nombre> <username> <password> <rol>
+           Formato legado: crear_usuario <dni_ignorado> <nombre> <username> <password> <rol> */
+        if (argc >= 7) {
+            crearUsuario(argv[3], argv[4], argv[5], argv[6]);
+        } else if (argc >= 6) {
+            crearUsuario(argv[2], argv[3], argv[4], argv[5]);
+        } else {
+            printf("ERROR;Parametros_Invalidos\n");
+            return 1;
+        }
     }
-    // Simulador de Paolo (Ventas)
+    else if (strcmp(argv[1], "editar_usuario") == 0) {
+        /* Formato vigente: editar_usuario <id> <rol> */
+        if (argc < 4) {
+            printf("ERROR;Parametros_Invalidos\n");
+            return 1;
+        }
+        int id = parsearId(argv[2]);
+        if (id == 0) {
+            printf("ERROR;ID_Invalido\n");
+            return 1;
+        }
+        editarUsuario(id, argv[3]);
+    }
+    else if (strcmp(argv[1], "eliminar_usuario") == 0) {
+        /* Formato vigente: eliminar_usuario <id> */
+        if (argc < 3) {
+            printf("ERROR;Parametros_Invalidos\n");
+            return 1;
+        }
+        int id = parsearId(argv[2]);
+        if (id == 0) {
+            printf("ERROR;ID_Invalido\n");
+            return 1;
+        }
+        eliminarUsuario(id);
+    }
+    // Ventas: registro real en PostgreSQL dentro de una transaccion
     else if (strcmp(argv[1], "buscar_prod_codigo") == 0) {
-        printf("OK;Paracetamol;5.50;100\n");
+        buscarProductos(argc > 2 ? argv[2] : "");
     }
     else if (strcmp(argv[1], "procesar_venta") == 0) {
-        printf("OK;Venta_Guardada_Con_Exito\n");
+        if (argc < 4) {
+            printf("ERROR;Parametros_Invalidos\n");
+            return 1;
+        }
+        const char *username = argc > 4 ? argv[4] : getenv("FARMACIA_USER");
+        if (procesarVenta(argv[2], argv[3], username) != 0) {
+            return 1;
+        }
     }
     // Simulador de Azumi (Reportes)
     else if (strcmp(argv[1], "historial") == 0) {
