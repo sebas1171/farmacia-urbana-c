@@ -1,18 +1,28 @@
-version: '3.8'
-
 services:
-  postgres-db:
-    image: postgres:15-alpine
-    container_name: farmacia_db_container
+  postgres:
+    image: postgres:16
+    container_name: farmacia_postgres_final
+    restart: always
     environment:
-      POSTGRES_USER: farmacia_admin
-      POSTGRES_PASSWORD: admin123
-      POSTGRES_DB: inventario_db
+      POSTGRES_USER: administrador
+      POSTGRES_PASSWORD: password_seguro
+      POSTGRES_DB: bd_farmacia
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      - db_data:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: farmacia_pgadmin_final
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@farmacia.com
+      PGADMIN_DEFAULT_PASSWORD: admin_password
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
 
 volumes:
-  pgdata:
+  db_data:
