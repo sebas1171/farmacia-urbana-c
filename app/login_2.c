@@ -3,32 +3,64 @@
 #include <string.h>
 #include <libpq-fe.h>
 
-/**
- * Valida el usuario, contraseña y estado activo en la base de datos PostgreSQL.
- * Imprime el resultado exacto: LOGIN_OK;ROL;NOMBRE o ERROR;Credenciales.
- */
+#include "login_2.h"
+
+/* Valida credenciales contra PostgreSQL usando FARMACIA_DB_CONN. */
 void validar_login(const char *username, const char *password) {
-    char conninfo[256];
-    snprintf(conninfo, sizeof(conninfo), "dbname=farmacia user=postgres password=tu_password host=localhost port=5432");
+    if (username == NULL || password == NULL ||
+        username[0] == '\0' || password[0] == '\0') {
+        printf("ERROR;Credenciales\n");
+        return;
+    }
+
+    const char *conninfo = getenv("FARMACIA_DB_CONN");
+    if (conninfo == NULL || conninfo[0] == '\0') {
+        printf("ERROR;FARMACIA_DB_CONN_no_definida\n");
+        return;
+    }
 
     PGconn *conn = PQconnectdb(conninfo);
+    if (conn == NULL || PQstatus(conn) != CONNECTION_OK) {
+        fprintf(stderr, "login: %s\n",
+                conn != NULL ? PQerrorMessage(conn) : "sin conexion");
+        printf("ERROR;conexion_bd_fallida\n");
+        if (conn != NULL) {
+            PQfinish(conn);
+        }
+        return;
+    }
 
-    if (PQstatus(conn) != CONNECTION_OK) {
-        printf("ERROR;Credenciales\n");
+    /* El login devuelve tambien la sucursal del usuario para que la interfaz
+       fije la sesion y todas las peticiones posteriores queden aisladas. */
+    const char *sql =
+        "SELECT u.rol, u.nombre, u.id_sucursal, s.nombre "
+        "FROM usuarios u "
+        "INNER JOIN sucursal s ON s.id = u.id_sucursal "
+        "WHERE u.username = $1 AND u.password = $2 AND u.activo = TRUE "
+        "LIMIT 1";
+    const Oid paramTypes[] = { 25, 25 };
+    const char *const paramValues[] = { username, password };
+    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues,
+                                 NULL, NULL, 0);
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "login: %s\n",
+                res != NULL ? PQerrorMessage(conn) : "sin resultado");
+        printf("ERROR;conexion_bd_fallida\n");
+        if (res != NULL) {
+            PQclear(res);
+        }
         PQfinish(conn);
         return;
     }
 
-    // Validamos credenciales y que el usuario esté activo (activo = TRUE)
-    const char *query = "SELECT rol, nombre FROM usuarios WHERE username = $1 AND password = $2 AND activo = TRUE";
-    const char *paramValues[2] = { username, password };
-
-    PGresult *res = PQexecParams(conn, query, 2, NULL, paramValues, NULL, NULL, 0);
-
-    if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
-        char *rol = PQgetvalue(res, 0, 0);
-        char *nombre = PQgetvalue(res, 0, 1);
-        printf("LOGIN_OK;%s;%s\n", rol, nombre);
+    if (PQntuples(res) > 0) {
+        /* Contrato: LOGIN_OK;<rol>;<nombre>;<id_sucursal>;<nombre_sucursal> */
+        printf("LOGIN_OK;%s;%s;%s;%s\n",
+               PQgetvalue(res, 0, 0),
+               PQgetvalue(res, 0, 1),
+               PQgetvalue(res, 0, 2),
+               PQgetvalue(res, 0, 3));
     } else {
         printf("ERROR;Credenciales\n");
     }

@@ -81,6 +81,22 @@ static int dniClienteValido(const char *dni) {
     return 1;
 }
 
+/* Agrega una condicion al WHERE dinamico con el conector AND cuando hace falta. */
+static void agregarCondicionSQL(char *where, size_t tam, const char *condicion) {
+    if (where == NULL || condicion == NULL || tam == 0) {
+        return;
+    }
+    size_t usado = strlen(where);
+    if (usado >= tam - 1) {
+        return;
+    }
+    if (usado > 0) {
+        snprintf(where + usado, tam - usado, " AND ");
+        usado = strlen(where);
+    }
+    snprintf(where + usado, tam - usado, "%s", condicion);
+}
+
 int reporteStockMinimo(const Producto inventario[], int total, int umbral) {
     if (inventario == NULL || total <= 0) {
         return 0;
@@ -88,8 +104,8 @@ int reporteStockMinimo(const Producto inventario[], int total, int umbral) {
 
     int impresos = 0;
     for (int i = 0; i < total; i++) {
-        if (inventario[i].stock < umbral) {
-            printf("%d;%s;%d;%s\n",
+        if (inventario[i].stock < (double)umbral) {
+            printf("%d;%s;%.2f;%s\n",
                 inventario[i].id,
                 inventario[i].nombre,
                 inventario[i].stock,
@@ -111,7 +127,7 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
             continue;  /* fecha malformada: se omite para no comparar en falso */
         }
         if (strcmp(inventario[i].fecha_vencimiento, fecha_limite) <= 0) {
-            printf("%d;%s;%d;%s\n",
+            printf("%d;%s;%.2f;%s\n",
                 inventario[i].id,
                 inventario[i].nombre,
                 inventario[i].stock,
@@ -155,13 +171,27 @@ static PGconn *getConexion() {
 }
 
 int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
-                           const char *id_vendedor, const char *dni_cliente) {
-    if (fecha_inicio == NULL || fecha_fin == NULL ||
-        !fechaValidaCalendario(fecha_inicio) || !fechaValidaCalendario(fecha_fin)) {
+                           const char *id_vendedor, const char *dni_cliente,
+                           int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    int usarFechaInicio = fecha_inicio != NULL && fecha_inicio[0] != '\0';
+    int usarFechaFin = fecha_fin != NULL && fecha_fin[0] != '\0';
+
+    /* Fechas vacias = reporte abierto: se omiten del WHERE y se devuelven
+       todas las ventas registradas. */
+    if (usarFechaInicio && !fechaValidaCalendario(fecha_inicio)) {
         printf("ERROR;Fecha_Invalida\n");
         return -1;
     }
-    if (strcmp(fecha_inicio, fecha_fin) > 0) {
+    if (usarFechaFin && !fechaValidaCalendario(fecha_fin)) {
+        printf("ERROR;Fecha_Invalida\n");
+        return -1;
+    }
+    if (usarFechaInicio && usarFechaFin && strcmp(fecha_inicio, fecha_fin) > 0) {
         printf("ERROR;Rango_Fechas_Invalido\n");
         return -1;
     }
@@ -184,19 +214,51 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
     }
 
     char sql[1024];
-    char filtro[128] = "";
-    Oid paramTypes[4] = {25, 25, 0, 0};
-    const char *paramValues[4] = {fecha_inicio, fecha_fin, NULL, NULL};
-    int paramLengths[4] = {
-        (int)strlen(fecha_inicio), (int)strlen(fecha_fin), 0, 0
-    };
-    const int paramFormats[4] = {0, 0, 0, 0};
-    int nparams = 2;
+    char where[512] = "";
+    char condicion[160];
+    Oid paramTypes[5] = {0, 0, 0, 0, 0};
+    const char *paramValues[5] = {NULL, NULL, NULL, NULL, NULL};
+    int paramLengths[5] = {0, 0, 0, 0, 0};
+    const int paramFormats[5] = {0, 0, 0, 0, 0};
+    int nparams = 0;
+
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    /* El historial SIEMPRE queda acotado a la sucursal de la sesión. */
+    nparams++;
+    snprintf(condicion, sizeof(condicion),
+             "v.id_sucursal = $%d::integer", nparams);
+    agregarCondicionSQL(where, sizeof(where), condicion);
+    paramTypes[nparams - 1] = 23;
+    paramValues[nparams - 1] = sucursal_txt;
+    paramLengths[nparams - 1] = (int)strlen(sucursal_txt);
+
+    if (usarFechaInicio) {
+        nparams++;
+        snprintf(condicion, sizeof(condicion),
+                 "v.fecha_hora >= CAST($%d AS date)", nparams);
+        agregarCondicionSQL(where, sizeof(where), condicion);
+        paramTypes[nparams - 1] = 25;
+        paramValues[nparams - 1] = fecha_inicio;
+        paramLengths[nparams - 1] = (int)strlen(fecha_inicio);
+    }
+
+    if (usarFechaFin) {
+        nparams++;
+        snprintf(condicion, sizeof(condicion),
+                 "v.fecha_hora < (CAST($%d AS date) + INTERVAL '1 day')", nparams);
+        agregarCondicionSQL(where, sizeof(where), condicion);
+        paramTypes[nparams - 1] = 25;
+        paramValues[nparams - 1] = fecha_fin;
+        paramLengths[nparams - 1] = (int)strlen(fecha_fin);
+    }
 
     if (usarFiltroVendedor) {
         nparams++;
-        snprintf(filtro + strlen(filtro), sizeof(filtro) - strlen(filtro),
-                 " AND v.id_vendedor = $%d::integer", nparams);
+        snprintf(condicion, sizeof(condicion),
+                 "v.id_vendedor = $%d::integer", nparams);
+        agregarCondicionSQL(where, sizeof(where), condicion);
         paramTypes[nparams - 1] = 23;
         paramValues[nparams - 1] = id_vendedor;
         paramLengths[nparams - 1] = (int)strlen(id_vendedor);
@@ -204,8 +266,9 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
 
     if (usarFiltroCliente) {
         nparams++;
-        snprintf(filtro + strlen(filtro), sizeof(filtro) - strlen(filtro),
-                 " AND v.dni_cliente = $%d", nparams);
+        snprintf(condicion, sizeof(condicion),
+                 "v.dni_cliente = $%d", nparams);
+        agregarCondicionSQL(where, sizeof(where), condicion);
         paramTypes[nparams - 1] = 25;
         paramValues[nparams - 1] = dni_cliente;
         paramLengths[nparams - 1] = (int)strlen(dni_cliente);
@@ -215,13 +278,20 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
     snprintf(sql, sizeof(sql),
         "SELECT v.id, v.dni_cliente, "
         "TO_CHAR(v.fecha_hora, 'YYYY-MM-DD HH24:MI:SS.MS'), v.total "
-        "FROM venta v "
-        "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day')%s "
+        "FROM venta v%s%s "
         "ORDER BY v.fecha_hora DESC, v.id DESC",
-        filtro);
+        where[0] != '\0' ? " WHERE " : "", where);
 
-    PGresult *res = PQexecParams(conn, sql, nparams, paramTypes,
-                                 paramValues, paramLengths, paramFormats, 0);
+    /* Si no hay filtros (fechas vacías y sin vendedor/cliente), libpq debe
+       recibir NULL en los arreglos de parámetros: el WHERE se omite y se
+       devuelven todas las ventas registradas. */
+    PGresult *res = PQexecParams(
+        conn, sql, nparams,
+        nparams > 0 ? paramTypes : NULL,
+        nparams > 0 ? paramValues : NULL,
+        nparams > 0 ? paramLengths : NULL,
+        nparams > 0 ? paramFormats : NULL,
+        0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_historial: %s\n",
@@ -262,13 +332,29 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
 
 /* --- Motor de alertas (stock <= 10 y productos que vencen en menos de 30 dias) --- */
 
-int reporteAlertas(void) {
+int reporteAlertas(int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
     PGconn *conn = getConexion();
     if (conn == NULL) {
         return -1;
     }
 
-    PGresult *res = PQexec(conn, "SELECT COUNT(*) FROM producto WHERE stock <= 10");
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+    const Oid tipos[] = { 23 };
+    const char *valores[] = { sucursal_txt };
+
+    char sql_stock[256];
+    snprintf(sql_stock, sizeof(sql_stock),
+             "SELECT COUNT(*) FROM producto "
+             "WHERE stock <= %d AND id_sucursal = $1",
+             STOCK_MINIMO_DEFAULT);
+    PGresult *res = PQexecParams(conn, sql_stock, 1, tipos, valores,
+                                 NULL, NULL, 0);
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_alertas: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_alertas_fallida\n");
@@ -282,9 +368,18 @@ int reporteAlertas(void) {
     int bajo_stock = atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
 
-    res = PQexec(conn, "SELECT COUNT(*) FROM producto "
-                       "WHERE fecha_vencimiento >= CURRENT_DATE "
-                       "AND fecha_vencimiento < CURRENT_DATE + INTERVAL '30 days'");
+    /* CURRENT_DATE depende de la zona horaria del contenedor (normalmente
+       UTC). Se usa la fecha local de Perú para que el conteo de vencimientos
+       coincida con la fecha que ve el usuario. */
+    const char *sql_venc =
+        "SELECT COUNT(*) FROM producto "
+        "WHERE fecha_vencimiento >= "
+        "(CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date "
+        "AND fecha_vencimiento < "
+        "((CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date "
+        "+ INTERVAL '30 days') "
+        "AND id_sucursal = $1";
+    res = PQexecParams(conn, sql_venc, 1, tipos, valores, NULL, NULL, 0);
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_alertas: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_alertas_fallida\n");
@@ -307,13 +402,26 @@ int reporteAlertas(void) {
 
 /* --- Metrica: producto mas vendido por unidades en el periodo --- */
 
-int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin) {
-    if (fecha_inicio == NULL || fecha_fin == NULL ||
-        !fechaValidaCalendario(fecha_inicio) || !fechaValidaCalendario(fecha_fin)) {
+int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin,
+                              int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    int usarInicio = fecha_inicio != NULL && fecha_inicio[0] != '\0';
+    int usarFin = fecha_fin != NULL && fecha_fin[0] != '\0';
+
+    /* Fechas vacías = reporte abierto (todas las ventas). */
+    if (usarInicio && !fechaValidaCalendario(fecha_inicio)) {
         printf("ERROR;Fecha_Invalida\n");
         return -1;
     }
-    if (strcmp(fecha_inicio, fecha_fin) > 0) {
+    if (usarFin && !fechaValidaCalendario(fecha_fin)) {
+        printf("ERROR;Fecha_Invalida\n");
+        return -1;
+    }
+    if (usarInicio && usarFin && strcmp(fecha_inicio, fecha_fin) > 0) {
         printf("ERROR;Rango_Fechas_Invalido\n");
         return -1;
     }
@@ -323,21 +431,59 @@ int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin) {
         return -1;
     }
 
-    char sql[] = "SELECT p.codigo_producto, p.nombre, SUM(dv.cantidad) AS total "
-                 "FROM venta v "
-                 "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
-                 "INNER JOIN producto p ON p.codigo_producto = dv.codigo_producto "
-                 "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day') "
-                 "GROUP BY p.codigo_producto, p.nombre "
-                 "ORDER BY total DESC, p.codigo_producto ASC "
-                 "LIMIT 1";
-    const Oid paramTypes[] = { 25, 25 };
-    const char * const paramValues[] = { fecha_inicio, fecha_fin };
-    const int paramLengths[] = { (int)strlen(fecha_inicio), (int)strlen(fecha_fin) };
-    const int paramFormats[] = { 0, 0 };
-    int resultFormat = 0;
+    char where[256] = "";
+    Oid paramTypes[3] = { 23, 25, 25 };
+    const char *paramValues[3] = { NULL, NULL, NULL };
+    int paramLengths[3] = { 0, 0, 0 };
+    const int paramFormats[3] = { 0, 0, 0 };
+    int nparams = 0;
 
-    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    /* Filtro obligatorio por sucursal: nunca se mezclan ventas de locales. */
+    nparams++;
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "WHERE v.id_sucursal = $%d::integer", nparams);
+    paramValues[nparams - 1] = sucursal_txt;
+    paramLengths[nparams - 1] = (int)strlen(sucursal_txt);
+
+    if (usarInicio) {
+        nparams++;
+        snprintf(where + strlen(where), sizeof(where) - strlen(where),
+                 "%sv.fecha_hora >= CAST($%d AS date)",
+                 where[0] != '\0' ? " AND " : "WHERE ", nparams);
+        paramValues[nparams - 1] = fecha_inicio;
+        paramLengths[nparams - 1] = (int)strlen(fecha_inicio);
+    }
+    if (usarFin) {
+        nparams++;
+        snprintf(where + strlen(where), sizeof(where) - strlen(where),
+                 "%sv.fecha_hora < (CAST($%d AS date) + INTERVAL '1 day')",
+                 where[0] != '\0' ? " AND " : "WHERE ", nparams);
+        paramValues[nparams - 1] = fecha_fin;
+        paramLengths[nparams - 1] = (int)strlen(fecha_fin);
+    }
+
+    char sql[1024];
+    snprintf(sql, sizeof(sql),
+             "SELECT p.codigo_producto, p.nombre, SUM(dv.cantidad) AS total "
+             "FROM venta v "
+             "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
+             "INNER JOIN producto p ON p.codigo_producto = dv.codigo_producto "
+             "%s "
+             "GROUP BY p.codigo_producto, p.nombre "
+             "ORDER BY total DESC, p.codigo_producto ASC "
+             "LIMIT 1",
+             where);
+
+    PGresult *res = PQexecParams(
+        conn, sql, nparams,
+        nparams > 0 ? paramTypes : NULL,
+        nparams > 0 ? paramValues : NULL,
+        nparams > 0 ? paramLengths : NULL,
+        nparams > 0 ? paramFormats : NULL,
+        0);
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_producto_top: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_producto_top_fallida\n");
@@ -358,7 +504,9 @@ int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin) {
         return 0;
     }
 
-    printf("OK;PRODUCTO_MAS_VENDIDO;%s;%s;%d\n", PQgetvalue(res, 0, 0), PQgetvalue(res, 0, 1), atoi(PQgetvalue(res, 0, 2)));
+    printf("OK;PRODUCTO_MAS_VENDIDO;%s;%s;%.2f\n",
+           PQgetvalue(res, 0, 0), PQgetvalue(res, 0, 1),
+           strtod(PQgetvalue(res, 0, 2), NULL));
     PQclear(res);
     PQfinish(conn);
     conexion = NULL;
@@ -367,13 +515,26 @@ int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin) {
 
 /* --- Metrica: ingresos totales por periodo (SUM con COALESCE) --- */
 
-int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin) {
-    if (fecha_inicio == NULL || fecha_fin == NULL ||
-        !fechaValidaCalendario(fecha_inicio) || !fechaValidaCalendario(fecha_fin)) {
+int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin,
+                           int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    int usarInicio = fecha_inicio != NULL && fecha_inicio[0] != '\0';
+    int usarFin = fecha_fin != NULL && fecha_fin[0] != '\0';
+
+    /* Fechas vacías = reporte abierto (todas las ventas). */
+    if (usarInicio && !fechaValidaCalendario(fecha_inicio)) {
         printf("ERROR;Fecha_Invalida\n");
         return -1;
     }
-    if (strcmp(fecha_inicio, fecha_fin) > 0) {
+    if (usarFin && !fechaValidaCalendario(fecha_fin)) {
+        printf("ERROR;Fecha_Invalida\n");
+        return -1;
+    }
+    if (usarInicio && usarFin && strcmp(fecha_inicio, fecha_fin) > 0) {
         printf("ERROR;Rango_Fechas_Invalido\n");
         return -1;
     }
@@ -383,17 +544,55 @@ int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin) {
         return -1;
     }
 
-    char sql[] = "SELECT COALESCE(SUM(dv.subtotal), 0) AS total "
-                 "FROM venta v "
-                 "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
-                 "WHERE v.fecha_hora >= CAST($1 AS date) AND v.fecha_hora < (CAST($2 AS date) + INTERVAL '1 day')";
-    const Oid paramTypes[] = { 25, 25 };
-    const char * const paramValues[] = { fecha_inicio, fecha_fin };
-    const int paramLengths[] = { (int)strlen(fecha_inicio), (int)strlen(fecha_fin) };
-    const int paramFormats[] = { 0, 0 };
-    int resultFormat = 0;
+    char where[256] = "";
+    Oid paramTypes[3] = { 23, 25, 25 };
+    const char *paramValues[3] = { NULL, NULL, NULL };
+    int paramLengths[3] = { 0, 0, 0 };
+    const int paramFormats[3] = { 0, 0, 0 };
+    int nparams = 0;
 
-    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    /* Filtro obligatorio por sucursal: nunca se mezclan ventas de locales. */
+    nparams++;
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "WHERE v.id_sucursal = $%d::integer", nparams);
+    paramValues[nparams - 1] = sucursal_txt;
+    paramLengths[nparams - 1] = (int)strlen(sucursal_txt);
+
+    if (usarInicio) {
+        nparams++;
+        snprintf(where + strlen(where), sizeof(where) - strlen(where),
+                 "%sv.fecha_hora >= CAST($%d AS date)",
+                 where[0] != '\0' ? " AND " : "WHERE ", nparams);
+        paramValues[nparams - 1] = fecha_inicio;
+        paramLengths[nparams - 1] = (int)strlen(fecha_inicio);
+    }
+    if (usarFin) {
+        nparams++;
+        snprintf(where + strlen(where), sizeof(where) - strlen(where),
+                 "%sv.fecha_hora < (CAST($%d AS date) + INTERVAL '1 day')",
+                 where[0] != '\0' ? " AND " : "WHERE ", nparams);
+        paramValues[nparams - 1] = fecha_fin;
+        paramLengths[nparams - 1] = (int)strlen(fecha_fin);
+    }
+
+    char sql[1024];
+    snprintf(sql, sizeof(sql),
+             "SELECT COALESCE(SUM(dv.subtotal), 0) AS total "
+             "FROM venta v "
+             "INNER JOIN detalle_venta dv ON dv.id_venta = v.id "
+             "%s",
+             where);
+
+    PGresult *res = PQexecParams(
+        conn, sql, nparams,
+        nparams > 0 ? paramTypes : NULL,
+        nparams > 0 ? paramValues : NULL,
+        nparams > 0 ? paramLengths : NULL,
+        nparams > 0 ? paramFormats : NULL,
+        0);
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_consulta_ingresos: %s\n", res != NULL ? PQerrorMessage(conn) : "sin resultado");
         printf("ERROR;consulta_ingresos_fallida\n");
@@ -415,20 +614,31 @@ int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin) {
 
 /* --- Listado de productos con stock critico desde PostgreSQL --- */
 
-int reporteAlertasStock(void) {
+int reporteAlertasStock(int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
     PGconn *conn = getConexion();
     if (conn == NULL) {
         return -1;
     }
 
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+    const Oid tipos[] = { 23 };
+    const char *valores[] = { sucursal_txt };
+
     char sql[256];
     snprintf(sql, sizeof(sql),
              "SELECT codigo_producto, nombre, stock "
-             "FROM producto WHERE stock <= %d "
+             "FROM producto WHERE stock <= %d AND id_sucursal = $1 "
              "ORDER BY stock ASC, nombre ASC",
              STOCK_MINIMO_DEFAULT);
 
-    PGresult *res = PQexec(conn, sql);
+    PGresult *res = PQexecParams(conn, sql, 1, tipos, valores,
+                                 NULL, NULL, 0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_alertas_stock: %s\n",
@@ -446,10 +656,10 @@ int reporteAlertasStock(void) {
         printf("OK;SIN_RESULTADOS\n");
     } else {
         for (int i = 0; i < filas; i++) {
-            printf("OK;STOCK;%s;%s;%d\n",
+            printf("OK;STOCK;%s;%s;%.2f\n",
                    PQgetvalue(res, i, 0),
                    PQgetvalue(res, i, 1),
-                   atoi(PQgetvalue(res, i, 2)));
+                   strtod(PQgetvalue(res, i, 2), NULL));
         }
     }
 
@@ -461,20 +671,35 @@ int reporteAlertasStock(void) {
 
 /* --- Listado de productos proximos a vencer desde PostgreSQL --- */
 
-int reporteAlertasVencimientos(void) {
+int reporteAlertasVencimientos(int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
     PGconn *conn = getConexion();
     if (conn == NULL) {
         return -1;
     }
 
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+    const Oid tipos[] = { 23 };
+    const char *valores[] = { sucursal_txt };
+
     const char *sql =
         "SELECT codigo_producto, nombre, TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD') "
         "FROM producto "
-        "WHERE fecha_vencimiento >= CURRENT_DATE "
-        "AND fecha_vencimiento < CURRENT_DATE + INTERVAL '30 days' "
+        "WHERE fecha_vencimiento >= "
+        "(CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date "
+        "AND fecha_vencimiento < "
+        "((CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date "
+        "+ INTERVAL '30 days') "
+        "AND id_sucursal = $1 "
         "ORDER BY fecha_vencimiento ASC, nombre ASC";
 
-    PGresult *res = PQexec(conn, sql);
+    PGresult *res = PQexecParams(conn, sql, 1, tipos, valores,
+                                 NULL, NULL, 0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ERROR;detalle_alertas_vencimientos: %s\n",

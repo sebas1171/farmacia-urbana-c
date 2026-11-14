@@ -1,18 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <libpq-fe.h>
 
 #include "ventas.h"
+#include "auditoria.h"
 
 #define MAX_ITEMS_VENTA 100
 
 typedef struct {
     char codigo[16];
-    int cantidad;
+    double cantidad;   /* decimal: permite vender fracciones (ej. 0.5) */
 } ItemVenta;
 
 static char *trim(char *s) {
@@ -24,6 +26,12 @@ static char *trim(char *s) {
         s[--len] = '\0';
     }
     return s;
+}
+
+/* Redondea a 2 decimales para que el stock y el detalle coincidan con
+   NUMERIC(10,2). No usa <math.h> para no añadir -lm al enlace. */
+static double redondear2(double valor) {
+    return (double)((long long)(valor * 100.0 + 0.5)) / 100.0;
 }
 
 /* Parsea "CODIGO,cantidad|CODIGO,cantidad|...".
@@ -60,9 +68,14 @@ static int parsearCarrito(const char *carrito, ItemVenta items[], int max) {
 
         errno = 0;
         char *fin = NULL;
-        long cantidad = strtol(cantidad_txt, &fin, 10);
+        double cantidad = strtod(cantidad_txt, &fin);
         if (errno == ERANGE || fin == cantidad_txt || *fin != '\0' ||
-            cantidad <= 0 || cantidad > INT_MAX) {
+            cantidad <= 0.0 || cantidad > 99999999.99) {
+            free(copia);
+            return -1;
+        }
+        cantidad = redondear2(cantidad);
+        if (cantidad < 0.01) {
             free(copia);
             return -1;
         }
@@ -75,18 +88,14 @@ static int parsearCarrito(const char *carrito, ItemVenta items[], int max) {
             }
         }
         if (encontrado >= 0) {
-            if (items[encontrado].cantidad > INT_MAX - (int)cantidad) {
-                free(copia);
-                return -1;
-            }
-            items[encontrado].cantidad += (int)cantidad;
+            items[encontrado].cantidad += cantidad;
         } else {
             if (n >= max) {
                 free(copia);
                 return -1;
             }
             snprintf(items[n].codigo, sizeof(items[n].codigo), "%s", codigo);
-            items[n].cantidad = (int)cantidad;
+            items[n].cantidad = cantidad;
             n++;
         }
 
@@ -117,7 +126,12 @@ static void rollbackYError(PGconn *conn, const char *mensaje) {
     printf("ERROR;%s\n", mensaje);
 }
 
-int procesarVenta(const char *dni, const char *carrito, const char *username) {
+int procesarVenta(const char *dni, const char *carrito, const char *cmp,
+                  const char *username, int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
     if (!dniValido(dni)) {
         printf("ERROR;DNI_Invalido\n");
         return -1;
@@ -163,15 +177,22 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
     }
     PQclear(res);
 
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
     /* Resolver el vendedor a partir del username. Si no se recibe username,
-       la venta se registra con id_vendedor NULL (columna opcional). */
+       la venta se registra con id_vendedor NULL (columna opcional).
+       El vendedor debe pertenecer a la misma sucursal de la sesión.
+       También se lee su rol para decidir si puede vender sin CMP (ADMIN). */
     char id_vendedor[16] = "";
+    char rol_vendedor[16] = "";
     if (username != NULL && username[0] != '\0') {
         const char *sql_vendedor =
-            "SELECT id FROM usuarios WHERE username = $1 AND activo = TRUE";
-        const Oid tipos_vendedor[] = { 25 };
-        const char *valores_vendedor[] = { username };
-        res = PQexecParams(conn, sql_vendedor, 1, tipos_vendedor,
+            "SELECT id, rol FROM usuarios "
+            "WHERE username = $1 AND activo = TRUE AND id_sucursal = $2";
+        const Oid tipos_vendedor[] = { 25, 23 };
+        const char *valores_vendedor[] = { username, sucursal_txt };
+        res = PQexecParams(conn, sql_vendedor, 2, tipos_vendedor,
                            valores_vendedor, NULL, NULL, 0);
         if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
             fprintf(stderr, "ventas vendedor: %s\n", PQerrorMessage(conn));
@@ -189,19 +210,26 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
             return -1;
         }
         snprintf(id_vendedor, sizeof(id_vendedor), "%s", PQgetvalue(res, 0, 0));
+        snprintf(rol_vendedor, sizeof(rol_vendedor), "%s", PQgetvalue(res, 0, 1));
         PQclear(res);
     }
 
     const char *dni_valor = (dni != NULL && dni[0] != '\0') ? dni : NULL;
+    /* La fecha se registra explícitamente en la zona horaria de Perú
+       (America/Lima, UTC-5). No se delega al default del contenedor Docker,
+       que normalmente corre en UTC. */
     const char *sql_venta =
-        "INSERT INTO venta (id_vendedor, dni_cliente, total) "
-        "VALUES ($1, $2, 0) RETURNING id";
-    const Oid tipos_venta[] = { 23, 25 };
+        "INSERT INTO venta "
+        "(fecha_hora, id_vendedor, dni_cliente, total, id_sucursal) "
+        "VALUES (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima', $1, $2, 0, $3) "
+        "RETURNING id";
+    const Oid tipos_venta[] = { 23, 25, 23 };
     const char *valores_venta[] = {
         id_vendedor[0] != '\0' ? id_vendedor : NULL,
-        dni_valor
+        dni_valor,
+        sucursal_txt
     };
-    res = PQexecParams(conn, sql_venta, 2, tipos_venta, valores_venta,
+    res = PQexecParams(conn, sql_venta, 3, tipos_venta, valores_venta,
                        NULL, NULL, 0);
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "ventas INSERT venta: %s\n", PQerrorMessage(conn));
@@ -220,11 +248,12 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
 
     for (int i = 0; i < n_items; i++) {
         const char *sql_producto =
-            "SELECT nombre, precio, stock FROM producto "
-            "WHERE codigo_producto = $1 FOR UPDATE";
-        const Oid tipos_producto[] = { 25 };
-        const char *valores_producto[] = { items[i].codigo };
-        res = PQexecParams(conn, sql_producto, 1, tipos_producto,
+            "SELECT nombre, precio, stock, COALESCE(requiere_receta, FALSE) "
+            "FROM producto "
+            "WHERE codigo_producto = $1 AND id_sucursal = $2 FOR UPDATE";
+        const Oid tipos_producto[] = { 25, 23 };
+        const char *valores_producto[] = { items[i].codigo, sucursal_txt };
+        res = PQexecParams(conn, sql_producto, 2, tipos_producto,
                            valores_producto, NULL, NULL, 0);
 
         if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -248,10 +277,19 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
         }
 
         double precio = strtod(PQgetvalue(res, 0, 1), NULL);
-        int stock = atoi(PQgetvalue(res, 0, 2));
+        double stock = strtod(PQgetvalue(res, 0, 2), NULL);
+        int requiere_receta = (strcmp(PQgetvalue(res, 0, 3), "t") == 0);
         PQclear(res);
 
-        if (stock < items[i].cantidad) {
+        if (stock + 1e-9 < items[i].cantidad) {
+            /* Bitácora local: la venta se rechaza por falta de stock. */
+            char log_mensaje[160];
+            snprintf(log_mensaje, sizeof(log_mensaje),
+                     "Venta rechazada: stock insuficiente de %.15s "
+                     "(pedido %.2f, disponible %.2f)",
+                     items[i].codigo, items[i].cantidad, stock);
+            escribir_log_local(log_mensaje);
+
             char mensaje[96];
             snprintf(mensaje, sizeof(mensaje), "Stock_Insuficiente:%.15s",
                      items[i].codigo);
@@ -260,19 +298,37 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
             return -1;
         }
 
-        double subtotal = precio * items[i].cantidad;
-        total += subtotal;
+        /* Control de recetas: si el producto la requiere y el vendedor no es
+           ADMIN, es obligatorio informar el CMP del recetario. */
+        if (requiere_receta &&
+            (cmp == NULL || cmp[0] == '\0') &&
+            strcasecmp(rol_vendedor, "ADMIN") != 0) {
+            char log_mensaje[192];
+            snprintf(log_mensaje, sizeof(log_mensaje),
+                     "Venta rechazada: %.15s requiere receta y no se "
+                     "informo CMP (usuario %.31s)",
+                     items[i].codigo,
+                     (username != NULL && username[0] != '\0') ? username : "-");
+            escribir_log_local(log_mensaje);
 
-        char cantidad_txt[16];
+            rollbackYError(conn, "Receta_Requerida");
+            PQfinish(conn);
+            return -1;
+        }
+
+        double subtotal = redondear2(precio * items[i].cantidad);
+        total = redondear2(total + subtotal);
+
+        char cantidad_txt[32];
         char subtotal_txt[32];
-        snprintf(cantidad_txt, sizeof(cantidad_txt), "%d", items[i].cantidad);
+        snprintf(cantidad_txt, sizeof(cantidad_txt), "%.2f", items[i].cantidad);
         snprintf(subtotal_txt, sizeof(subtotal_txt), "%.2f", subtotal);
 
         const char *sql_detalle =
             "INSERT INTO detalle_venta "
             "(id_venta, codigo_producto, cantidad, subtotal) "
             "VALUES ($1, $2, $3, $4)";
-        const Oid tipos_detalle[] = { 23, 25, 23, 1700 };
+        const Oid tipos_detalle[] = { 23, 25, 1700, 1700 };
         const char *valores_detalle[] = {
             id_venta, items[i].codigo, cantidad_txt, subtotal_txt
         };
@@ -290,11 +346,13 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
         PQclear(res);
 
         const char *sql_stock =
-            "UPDATE producto SET stock = stock - $2 "
-            "WHERE codigo_producto = $1";
-        const Oid tipos_stock[] = { 25, 23 };
-        const char *valores_stock[] = { items[i].codigo, cantidad_txt };
-        res = PQexecParams(conn, sql_stock, 2, tipos_stock,
+            "UPDATE producto SET stock = stock - $2::numeric "
+            "WHERE codigo_producto = $1 AND id_sucursal = $3";
+        const Oid tipos_stock[] = { 25, 1700, 23 };
+        const char *valores_stock[] = {
+            items[i].codigo, cantidad_txt, sucursal_txt
+        };
+        res = PQexecParams(conn, sql_stock, 3, tipos_stock,
                            valores_stock, NULL, NULL, 0);
         if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {
             fprintf(stderr, "ventas UPDATE stock: %s\n", PQerrorMessage(conn));
@@ -311,10 +369,12 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
     char total_txt[32];
     snprintf(total_txt, sizeof(total_txt), "%.2f", total);
 
-    const char *sql_total = "UPDATE venta SET total = $2 WHERE id = $1";
-    const Oid tipos_total[] = { 23, 1700 };
-    const char *valores_total[] = { id_venta, total_txt };
-    res = PQexecParams(conn, sql_total, 2, tipos_total,
+    const char *sql_total =
+        "UPDATE venta SET total = $2 "
+        "WHERE id = $1 AND id_sucursal = $3";
+    const Oid tipos_total[] = { 23, 1700, 23 };
+    const char *valores_total[] = { id_venta, total_txt, sucursal_txt };
+    res = PQexecParams(conn, sql_total, 3, tipos_total,
                        valores_total, NULL, NULL, 0);
     if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {
         fprintf(stderr, "ventas UPDATE total: %s\n", PQerrorMessage(conn));
@@ -326,6 +386,19 @@ int procesarVenta(const char *dni, const char *carrito, const char *username) {
         return -1;
     }
     PQclear(res);
+
+    /* Auditoría: se registra la venta dentro de la misma transacción para
+       que quede confirmada (COMMIT) solo si la venta también lo está. */
+    char accion[1024];
+    snprintf(accion, sizeof(accion),
+             "Venta id=%s total=%.2f dni=%s cmp=%s vendedor=%s "
+             "sucursal=%d carrito=%s",
+             id_venta, total,
+             (dni_valor != NULL) ? dni_valor : "-",
+             (cmp != NULL && cmp[0] != '\0') ? cmp : "-",
+             (username != NULL && username[0] != '\0') ? username : "-",
+             id_sucursal, carrito);
+    registrar_auditoria(conn, username, accion);
 
     res = PQexec(conn, "COMMIT");
     if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {

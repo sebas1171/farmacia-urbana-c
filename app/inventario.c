@@ -2,9 +2,14 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <math.h>
+#include <time.h>
+#include <unistd.h>
 #include <libpq-fe.h>
 
 #include "inventario.h"
+#include "auditoria.h"
 
 /* Conexión PostgreSQL (libpq). Se abre perezosamente con la cadena de
  * conexión de la variable de entorno FARMACIA_DB_CONN y se libera con
@@ -12,29 +17,36 @@
 static PGconn *conexion = NULL;
 
 /* Devuelve la conexión activa o NULL si no está disponible. */
-static PGconn *getConexion() {
+static PGconn *getConexion(void) {
     const char *conn_str = getenv("FARMACIA_DB_CONN");
-    if (conn_str == NULL) {
+    if (conn_str == NULL || conn_str[0] == '\0') {
         fprintf(stderr, "ERROR;FARMACIA_DB_CONN_no_definida\n");
+        printf("ERROR;FARMACIA_DB_CONN_no_definida\n");
         return NULL;
     }
     if (conexion == NULL) {
         conexion = PQconnectdb(conn_str);
     }
-    if (PQstatus(conexion) != CONNECTION_OK) {
-        fprintf(stderr, "ERROR;conexion_farmacia_fallida\n");
+    if (conexion == NULL || PQstatus(conexion) != CONNECTION_OK) {
+        if (conexion != NULL) {
+            fprintf(stderr, "ERROR;detalle_conexion: %s\n", PQerrorMessage(conexion));
+            PQfinish(conexion);
+            conexion = NULL;
+        }
+        printf("ERROR;conexion_bd_fallida\n");
         return NULL;
     }
     return conexion;
 }
 
-/* Recorre la cadena y rechaza comas y saltos de línea (rompen el CSV). */
+/* Recorre la cadena y rechaza separadores que rompen el contrato IPC/CSV
+   (',' separa cantidad, ';' separa campos y los saltos de línea registros). */
 static int textoLimpio(const char *s) {
     if (s == NULL) {
         return 0;
     }
     for (int i = 0; s[i] != '\0'; i++) {
-        if (s[i] == ',' || s[i] == '\n' || s[i] == '\r') {
+        if (s[i] == ',' || s[i] == ';' || s[i] == '\n' || s[i] == '\r') {
             return 0;
         }
     }
@@ -58,8 +70,24 @@ static int fechaValida(const char *f) {
     return 1;
 }
 
-/* Valida los campos comunes. Devuelve 1 si todo es correcto. */
-static int camposValidos(const char *nombre, float precio, int stock,
+/* Convierte un número decimal no negativo. Devuelve 1 si es válido. */
+static int parsearDecimalNoNegativo(const char *texto, double *destino) {
+    if (texto == NULL || texto[0] == '\0' || destino == NULL) {
+        return 0;
+    }
+    errno = 0;
+    char *fin = NULL;
+    double valor = strtod(texto, &fin);
+    if (errno == ERANGE || fin == texto || *fin != '\0' ||
+        !isfinite(valor) || valor < 0.0) {
+        return 0;
+    }
+    *destino = valor;
+    return 1;
+}
+
+/* Valida los campos usados por las funciones en memoria. */
+static int camposValidos(const char *nombre, float precio, double stock,
                          const char *lote, const char *fecha_vencimiento) {
     if (nombre == NULL || lote == NULL || fecha_vencimiento == NULL) {
         return 0;
@@ -71,7 +99,7 @@ static int camposValidos(const char *nombre, float precio, int stock,
         strlen(lote)   >= sizeof(((Producto *)0)->lote)) {
         return 0;
     }
-    if (precio < 0.0f || stock < 0) {
+    if (precio < 0.0f || !isfinite((double)precio) || stock < 0.0) {
         return 0;
     }
     if (!textoLimpio(nombre) || !textoLimpio(lote) || !textoLimpio(fecha_vencimiento)) {
@@ -90,7 +118,7 @@ static void copiarCampo(char *dest, size_t tam, const char *src) {
 }
 
 int registrarProducto(Producto inventario[], int *total, int id,
-                      const char *nombre, float precio, int stock,
+                      const char *nombre, float precio, double stock,
                       const char *lote, const char *fecha_vencimiento) {
     if (inventario == NULL || total == NULL) {
         return -1;
@@ -120,7 +148,7 @@ int registrarProducto(Producto inventario[], int *total, int id,
 }
 
 int editarProducto(Producto inventario[], int total, int id,
-                   const char *nombre, float precio, int stock,
+                   const char *nombre, float precio, double stock,
                    const char *lote, const char *fecha_vencimiento) {
     if (inventario == NULL) {
         return -1;
@@ -154,7 +182,7 @@ void listarProductos(Producto inventario[], int total) {
         return;
     }
     for (int i = 0; i < total; i++) {
-        printf("%d;%s;%.2f;%d;%s;%s\n",
+        printf("%d;%s;%.2f;%.2f;%s;%s\n",
                inventario[i].id,
                inventario[i].nombre,
                inventario[i].precio,
@@ -167,69 +195,63 @@ void listarProductos(Producto inventario[], int total) {
 /* --- PostgreSQL (libpq): generación de códigos y búsqueda --- */
 
 int generarCodigoProducto(int id_categoria, char *buffer, size_t tam) {
+    if (buffer == NULL || tam == 0 || id_categoria <= 0) {
+        return -1;
+    }
+
     PGconn *conn = getConexion();
     if (conn == NULL) {
         return -1;
     }
 
-    /* Obtiene las primeras tres letras del nombre de la categoría en mayúsculas. */
-    char idStr[32];
-    snprintf(idStr, sizeof(idStr), "%d", id_categoria);
-    const Oid paramTypes[] = { 21 }; /* OID de int4 */
-    const char * const paramValues[] = { idStr };
-    const int paramLengths[] = { (int)strlen(idStr) };
-    const int paramFormats[] = { 0 };
-    int resultFormat = 0;
+    /* init_db.sql no define la tabla `categorias`. Usamos el id numérico
+       como prefijo estable: MED-<id_categoria:03d>-<secuencia:03d>. */
+    char prefijo[16];
+    snprintf(prefijo, sizeof(prefijo), "MED-%03d", id_categoria);
 
-    char sql[] = "SELECT UPPER(LEFT(nombre, 3)) FROM categorias WHERE id = $1::integer";
-    PGresult *res = PQexecParams(conn, sql, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    char patron[32];
+    snprintf(patron, sizeof(patron), "%s-%%", prefijo);
 
-    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        fprintf(stderr, "ERROR;consulta_categoria_fallida: %s\n", PQerrorMessage(conn));
-        PQclear(res);
+    const char *sql =
+        "SELECT COALESCE(MAX(CASE "
+        "  WHEN split_part(codigo_producto, '-', 3) ~ '^[0-9]+$' "
+        "  THEN split_part(codigo_producto, '-', 3)::integer ELSE 0 END), 0) "
+        "FROM producto WHERE codigo_producto LIKE $1";
+    const Oid paramTypes[] = { 25 }; /* OID de text */
+    const char *const paramValues[] = { patron };
+    PGresult *res = PQexecParams(conn, sql, 1, paramTypes, paramValues,
+                                 NULL, NULL, 0);
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "ERROR;consulta_codigo_fallida: %s\n", PQerrorMessage(conn));
+        printf("ERROR;consulta_codigo_fallida\n");
+        if (res != NULL) {
+            PQclear(res);
+        }
         return -1;
     }
-    if (PQntuples(res) < 1) {
-        printf("ERROR;Categoria_No_Encontrada\n");
-        PQclear(res);
-        return -1;
-    }
 
-    char prefix[8];
-    strncpy(prefix, PQgetvalue(res, 0, 0), sizeof(prefix) - 1);
-    prefix[sizeof(prefix) - 1] = '\0';
+    int siguiente = atoi(PQgetvalue(res, 0, 0)) + 1;
+    int len = snprintf(buffer, tam, "%s-%03d", prefijo, siguiente);
     PQclear(res);
 
-    /* Obtiene el mayor número registrado para el prefijo de la categoría
-       (ej. MED-PAR-001, MED-PAR-003) y genera el siguiente con tres dígitos. */
-    char sqlCount[] = "SELECT COALESCE(MAX(CAST(split_part(codigo, '-', 3) AS INTEGER)), 0) FROM productos WHERE codigo LIKE 'MED-' || $1 || '-%'";
-    const Oid paramTypesText[] = { 25 }; /* OID de text */
-    const char *const paramValuesText[] = { prefix };
-    const int paramLengthsText[] = { (int)strlen(prefix) };
-    PGresult *resCount = PQexecParams(conn, sqlCount, 1, paramTypesText, paramValuesText, paramLengthsText, paramFormats, resultFormat);
-
-    if (PQresultStatus(resCount) != PGRES_TUPLES_OK) {
-        fprintf(stderr, "ERROR;consulta_codigo_fallida\n");
-        PQclear(resCount);
-        return -1;
-    }
-
-    int total = atoi(PQgetvalue(resCount, 0, 0));
-    int siguiente = total + 1;
-    int len = snprintf(buffer, tam, "MED-%s-%03d", prefix, siguiente);
     if (len < 0 || (size_t)len >= tam) {
         fprintf(stderr, "ERROR;buffer_codigo_corto\n");
-        PQclear(resCount);
+        printf("ERROR;buffer_codigo_corto\n");
         return -1;
     }
-    PQclear(resCount);
 
     return 0;
 }
 
-void buscarProductos(const char *texto) {
+void buscarProductos(const char *texto, int id_sucursal) {
     PGconn *conn = getConexion();
     if (conn == NULL) {
+        return;
+    }
+
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
         return;
     }
 
@@ -237,24 +259,39 @@ void buscarProductos(const char *texto) {
        comodín para devolver el inventario inicial (primeros 200 productos). */
     const char *termino = (texto == NULL) ? "" : texto;
 
-    /* El patrón se compone directamente en SQL: ILIKE '%' || $1 || '%'. */
-    const Oid paramTypes[] = { 25 }; /* OID de text */
-    const int paramLengths[] = { (int)strlen(termino) };
-    const char *paramValues[] = { termino };
-    const int paramFormats[] = { 0 };
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    /* El patrón se compone directamente en SQL: ILIKE '%' || $1 || '%'.
+       $2 aísla el inventario de la sucursal de la sesión. */
+    const Oid paramTypes[] = { 25, 23 }; /* text, integer */
+    const int paramLengths[] = {
+        (int)strlen(termino), (int)strlen(sucursal_txt)
+    };
+    const char *paramValues[] = { termino, sucursal_txt };
+    const int paramFormats[] = { 0, 0 };
     int resultFormat = 0;
 
-    /* La fecha se obtiene como texto via TO_CHAR con formato YYYY-MM-DD,
-       de modo que PostgreSQL valida el tipo DATE antes de devolverla. */
+    /* Contrato: OK;Codigo;Nombre;Precio;Stock;Vencimiento;Categoria;Requiere_Receta
+       La fecha se obtiene como texto via TO_CHAR con formato YYYY-MM-DD,
+       de modo que PostgreSQL valida el tipo DATE antes de devolverla.
+       El índice 4 (base 0) es siempre la fecha de vencimiento, el índice
+       5 la categoría y el índice 6 si el producto requiere receta (1/0). */
     char sql[] = "SELECT codigo_producto, nombre, precio, stock, "
-                 "COALESCE(TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD'), '') "
+                 "COALESCE(TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD'), ''), "
+                 "COALESCE(categoria, 'Medicamento'), "
+                 "COALESCE(requiere_receta, FALSE) "
                  "FROM producto "
-                 "WHERE codigo_producto ILIKE '%' || $1 || '%' OR nombre ILIKE '%' || $1 || '%' "
+                 "WHERE (codigo_producto ILIKE '%' || $1 || '%' "
+                 "   OR nombre ILIKE '%' || $1 || '%') "
+                 "AND id_sucursal = $2 "
                  "ORDER BY nombre ASC LIMIT 200";
-    PGresult *res = PQexecParams(conn, sql, 1, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues,
+                                 paramLengths, paramFormats, resultFormat);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
-        fprintf(stderr, "ERROR;consulta_productos_fallida\n");
+        fprintf(stderr, "ERROR;consulta_productos_fallida: %s\n", PQerrorMessage(conn));
+        printf("ERROR;consulta_productos_fallida\n");
         if (res != NULL) {
             PQclear(res);
         }
@@ -263,7 +300,8 @@ void buscarProductos(const char *texto) {
 
     int filas = PQntuples(res);
     if (filas == 0) {
-        printf("ERROR;Producto_No_Encontrado\n");
+        /* Sin coincidencias no es un fallo: la interfaz limpia la tabla. */
+        printf("OK;SIN_RESULTADOS\n");
         PQclear(res);
         return;
     }
@@ -274,11 +312,366 @@ void buscarProductos(const char *texto) {
         const char *precio = PQgetvalue(res, i, 2);
         const char *stock = PQgetvalue(res, i, 3);
         const char *fecha = PQgetvalue(res, i, 4);
+        const char *categoria = PQgetvalue(res, i, 5);
+        const char *requiere_receta = PQgetvalue(res, i, 6);
 
-        printf("OK;%s;%s;%.2f;%d;%s\n", codigo, nombre, strtod(precio, NULL), atoi(stock), fecha);
+        /* Contrato fijo de 7 columnas:
+           Código; Nombre; Precio; Stock decimal; Vencimiento; Categoría;
+           Requiere_Receta (1/0). */
+        printf("OK;%s;%s;%.2f;%.2f;%s;%s;%s\n",
+               codigo, nombre, strtod(precio, NULL),
+               strtod(stock, NULL), fecha, categoria,
+               (strcmp(requiere_receta, "t") == 0) ? "1" : "0");
     }
 
     PQclear(res);
+}
+
+/* Búsqueda exacta por código, usada por el IPC `buscar_prod_codigo`.
+   Contrato: OK;Codigo;Nombre;Precio;Stock;Vencimiento */
+void buscarProductoPorCodigo(const char *codigo, int id_sucursal) {
+    if (codigo == NULL || codigo[0] == '\0') {
+        printf("ERROR;Codigo_Vacio\n");
+        return;
+    }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return;
+    }
+
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return;
+    }
+
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    const char *sql =
+        "SELECT codigo_producto, nombre, precio, stock, "
+        "COALESCE(TO_CHAR(fecha_vencimiento, 'YYYY-MM-DD'), '') "
+        "FROM producto WHERE codigo_producto = $1 "
+        "AND id_sucursal = $2 LIMIT 1";
+    const Oid paramTypes[] = { 25, 23 };
+    const char *const paramValues[] = { codigo, sucursal_txt };
+    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues,
+                                 NULL, NULL, 0);
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "ERROR;consulta_producto_codigo_fallida: %s\n",
+                PQerrorMessage(conn));
+        printf("ERROR;consulta_producto_fallida\n");
+        if (res != NULL) {
+            PQclear(res);
+        }
+        return;
+    }
+
+    if (PQntuples(res) == 0) {
+        printf("OK;SIN_RESULTADOS\n");
+        PQclear(res);
+        return;
+    }
+
+    printf("OK;%s;%s;%.2f;%.2f;%s\n",
+           PQgetvalue(res, 0, 0),
+           PQgetvalue(res, 0, 1),
+           strtod(PQgetvalue(res, 0, 2), NULL),
+           strtod(PQgetvalue(res, 0, 3), NULL),
+           PQgetvalue(res, 0, 4));
+    PQclear(res);
+}
+
+/* --- CRUD de inventario contra PostgreSQL --- */
+
+/* Genera un código de barras EAN-13 de Perú: prefijo 775 + 9 dígitos
+   aleatorios + dígito verificador. El resultado siempre tiene 13 caracteres
+   y es un EAN-13 válido (no solo 13 dígitos al azar). */
+static void generarCodigoBarrasAUTO(char *buffer, size_t tam) {
+    if (buffer == NULL || tam < 14) {
+        if (buffer != NULL && tam > 0) {
+            buffer[0] = '\0';
+        }
+        return;
+    }
+
+    static int semilla_iniciada = 0;
+    if (!semilla_iniciada) {
+        /* Cada petición IPC es un proceso nuevo; se combina el reloj con el
+           PID para que dos altas simultáneas no generen la misma secuencia. */
+        srand((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
+        semilla_iniciada = 1;
+    }
+
+    buffer[0] = '7';
+    buffer[1] = '7';
+    buffer[2] = '5';
+    for (int i = 3; i < 12; i++) {
+        buffer[i] = (char)('0' + (rand() % 10));
+    }
+
+    /* Dígito verificador EAN-13: posiciones impares *1, pares *3. */
+    int suma = 0;
+    for (int i = 0; i < 12; i++) {
+        int digito = buffer[i] - '0';
+        suma += (i % 2 == 0) ? digito : digito * 3;
+    }
+    int verificador = (10 - (suma % 10)) % 10;
+    buffer[12] = (char)('0' + verificador);
+    buffer[13] = '\0';
+}
+
+/* La categoría es opcional; si no se informa se usa el valor por defecto
+   del esquema para no perder compatibilidad con clientes antiguos. */
+static const char *normalizarCategoria(const char *categoria) {
+    return (categoria != NULL && categoria[0] != '\0')
+        ? categoria : "Medicamento";
+}
+
+/* Valida los datos recibidos desde la interfaz. lote, fecha y categoria son
+   opcionales. */
+static int validarProductoDB(const char *codigo, const char *nombre,
+                             const char *precio_txt, const char *stock_txt,
+                             const char *lote, const char *fecha,
+                             const char *categoria,
+                             double *precio_out, double *stock_out) {
+    if (codigo == NULL || nombre == NULL || precio_txt == NULL || stock_txt == NULL) {
+        return 0;
+    }
+    if (codigo[0] == '\0' || strlen(codigo) > 13) {
+        return 0;
+    }
+    if (nombre[0] == '\0' || strlen(nombre) > 100) {
+        return 0;
+    }
+    if (lote != NULL && strlen(lote) > 50) {
+        return 0;
+    }
+    if (fecha != NULL && fecha[0] != '\0' && !fechaValida(fecha)) {
+        return 0;
+    }
+    if (categoria != NULL && strlen(categoria) > 50) {
+        return 0;
+    }
+    if (!textoLimpio(codigo) || !textoLimpio(nombre)) {
+        return 0;
+    }
+    if (lote != NULL && lote[0] != '\0' && !textoLimpio(lote)) {
+        return 0;
+    }
+    if (categoria != NULL && categoria[0] != '\0' && !textoLimpio(categoria)) {
+        return 0;
+    }
+    if (!parsearDecimalNoNegativo(precio_txt, precio_out) ||
+        !parsearDecimalNoNegativo(stock_txt, stock_out)) {
+        return 0;
+    }
+    return 1;
+}
+
+int crear_prod(const char *codigo, const char *nombre, const char *precio_txt,
+               const char *stock_txt, const char *lote, const char *fecha,
+               const char *categoria, int id_sucursal) {
+    /* Código autogenerado: la interfaz envía "AUTO" cuando el usuario deja
+       vacío el campo Código. También se acepta la cadena vacía por si un
+       cliente antiguo no aplica esa normalización. Se reemplaza por un
+       EAN-13 peruano (775...) antes de insertar. */
+    char codigo_auto[14];
+    const char *codigo_val = codigo;
+    if (codigo == NULL || codigo[0] == '\0' || strcmp(codigo, "AUTO") == 0) {
+        generarCodigoBarrasAUTO(codigo_auto, sizeof(codigo_auto));
+        codigo_val = codigo_auto;
+    }
+
+    const char *categoria_val = normalizarCategoria(categoria);
+    double precio = 0.0;
+    double stock = 0.0;
+    if (!validarProductoDB(codigo_val, nombre, precio_txt, stock_txt,
+                           lote, fecha, categoria_val, &precio, &stock)) {
+        printf("ERROR;Datos_Producto_Invalidos\n");
+        return -1;
+    }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return -1;
+    }
+
+    char precio_val[32];
+    char stock_val[32];
+    char sucursal_val[16];
+    snprintf(precio_val, sizeof(precio_val), "%.2f", precio);
+    snprintf(stock_val, sizeof(stock_val), "%.2f", stock);
+    snprintf(sucursal_val, sizeof(sucursal_val), "%d", id_sucursal);
+
+    const char *lote_val = (lote != NULL && lote[0] != '\0') ? lote : NULL;
+    const char *fecha_val = (fecha != NULL && fecha[0] != '\0') ? fecha : NULL;
+
+    const char *sql =
+        "INSERT INTO producto "
+        "(codigo_producto, nombre, precio, stock, lote, fecha_vencimiento, "
+        " categoria, id_sucursal) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+    const Oid tipos[] = { 25, 25, 1700, 1700, 25, 1082, 25, 23 };
+    const char *valores[] = {
+        codigo_val, nombre, precio_val, stock_val, lote_val, fecha_val,
+        categoria_val, sucursal_val
+    };
+
+    PGresult *res = PQexecParams(conn, sql, 8, tipos, valores, NULL, NULL, 0);
+    if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {
+        const char *sqlstate = res != NULL
+            ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : NULL;
+        if (sqlstate != NULL && strcmp(sqlstate, "23505") == 0) {
+            printf("ERROR;Codigo_Ya_Existe\n");
+        } else {
+            fprintf(stderr, "inventario INSERT: %s\n", PQerrorMessage(conn));
+            printf("ERROR;registro_producto_fallido\n");
+        }
+        if (res != NULL) {
+            PQclear(res);
+        }
+        return -1;
+    }
+
+    PQclear(res);
+    printf("OK;Producto_Creado\n");
+    return 0;
+}
+
+int editar_prod(const char *codigo, const char *nombre, const char *precio_txt,
+                const char *stock_txt, const char *lote, const char *fecha,
+                const char *categoria, int id_sucursal) {
+    const char *categoria_val = normalizarCategoria(categoria);
+    double precio = 0.0;
+    double stock = 0.0;
+    if (!validarProductoDB(codigo, nombre, precio_txt, stock_txt,
+                           lote, fecha, categoria_val, &precio, &stock)) {
+        printf("ERROR;Datos_Producto_Invalidos\n");
+        return -1;
+    }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return -1;
+    }
+
+    char precio_val[32];
+    char stock_val[32];
+    char sucursal_val[16];
+    snprintf(precio_val, sizeof(precio_val), "%.2f", precio);
+    snprintf(stock_val, sizeof(stock_val), "%.2f", stock);
+    snprintf(sucursal_val, sizeof(sucursal_val), "%d", id_sucursal);
+
+    const char *lote_val = (lote != NULL && lote[0] != '\0') ? lote : NULL;
+    const char *fecha_val = (fecha != NULL && fecha[0] != '\0') ? fecha : NULL;
+
+    const char *sql =
+        "UPDATE producto SET nombre = $2, precio = $3, stock = $4, "
+        "lote = $5, fecha_vencimiento = $6, categoria = $7 "
+        "WHERE codigo_producto = $1 AND id_sucursal = $8";
+    const Oid tipos[] = { 25, 25, 1700, 1700, 25, 1082, 25, 23 };
+    const char *valores[] = {
+        codigo, nombre, precio_val, stock_val, lote_val, fecha_val,
+        categoria_val, sucursal_val
+    };
+
+    PGresult *res = PQexecParams(conn, sql, 8, tipos, valores, NULL, NULL, 0);
+    if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {
+        fprintf(stderr, "inventario UPDATE: %s\n", PQerrorMessage(conn));
+        printf("ERROR;actualizacion_producto_fallida\n");
+        if (res != NULL) {
+            PQclear(res);
+        }
+        return -1;
+    }
+
+    if (strcmp(PQcmdTuples(res), "0") == 0) {
+        PQclear(res);
+        printf("ERROR;Producto_No_Encontrado\n");
+        return -1;
+    }
+
+    PQclear(res);
+
+    /* Auditoría: deja constancia de la edición y del usuario activo. */
+    char accion[320];
+    snprintf(accion, sizeof(accion),
+             "Editar producto %s (sucursal %d): nombre=%s, precio=%.2f, "
+             "stock=%.2f, lote=%s, vencimiento=%s, categoria=%s",
+             codigo, id_sucursal, nombre, precio, stock,
+             (lote_val != NULL) ? lote_val : "-",
+             (fecha_val != NULL) ? fecha_val : "-", categoria_val);
+    registrar_auditoria(conn, getenv("FARMACIA_USER"), accion);
+
+    printf("OK;Producto_Actualizado\n");
+    return 0;
+}
+
+int eliminar_prod(const char *codigo, int id_sucursal) {
+    if (codigo == NULL || codigo[0] == '\0' || strlen(codigo) > 13) {
+        printf("ERROR;Codigo_Invalido\n");
+        return -1;
+    }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return -1;
+    }
+
+    PGconn *conn = getConexion();
+    if (conn == NULL) {
+        return -1;
+    }
+
+    char sucursal_val[16];
+    snprintf(sucursal_val, sizeof(sucursal_val), "%d", id_sucursal);
+
+    const char *sql =
+        "DELETE FROM producto "
+        "WHERE codigo_producto = $1 AND id_sucursal = $2";
+    const Oid tipos[] = { 25, 23 };
+    const char *valores[] = { codigo, sucursal_val };
+
+    PGresult *res = PQexecParams(conn, sql, 2, tipos, valores, NULL, NULL, 0);
+    if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {
+        const char *sqlstate = res != NULL
+            ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : NULL;
+        if (sqlstate != NULL && strcmp(sqlstate, "23503") == 0) {
+            printf("ERROR;Producto_Con_Ventas_Asociadas\n");
+        } else {
+            fprintf(stderr, "inventario DELETE: %s\n", PQerrorMessage(conn));
+            printf("ERROR;eliminacion_producto_fallida\n");
+        }
+        if (res != NULL) {
+            PQclear(res);
+        }
+        return -1;
+    }
+
+    if (strcmp(PQcmdTuples(res), "0") == 0) {
+        PQclear(res);
+        printf("ERROR;Producto_No_Encontrado\n");
+        return -1;
+    }
+
+    PQclear(res);
+
+    /* Auditoría: deja constancia de la eliminación y del usuario activo. */
+    char accion[192];
+    snprintf(accion, sizeof(accion),
+             "Eliminar producto %s (sucursal %d)", codigo, id_sucursal);
+    registrar_auditoria(conn, getenv("FARMACIA_USER"), accion);
+
+    printf("OK;Producto_Eliminado\n");
+    return 0;
 }
 
 void cerrarConexion(void) {

@@ -8,7 +8,7 @@ typedef struct {
     int id;
     char nombre[50];
     float precio;
-    int stock;
+    double stock;                /* Decimal: admite fracciones (ej. 0.5) */
     char lote[20];
     char fecha_vencimiento[11]; /* Formato YYYY-MM-DD */
 } Producto;

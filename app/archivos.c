@@ -42,14 +42,14 @@ void cargarDatos(Producto inventario[], int *total) {
         }
 
         int id;
-        int stock;
+        double stock;
         float precio;
         char nombre[50];
         char lote[20];
         char fecha_vencimiento[11];
 
         int leidos = sscanf(linea,
-            "%d;%49[^;];%f;%d;%19[^;];%10[^\n]",
+            "%d;%49[^;];%f;%lf;%19[^;];%10[^\n]",
             &id, nombre, &precio, &stock, lote, fecha_vencimiento);
 
         if (leidos < 6) {
@@ -83,7 +83,7 @@ void guardarDatos(Producto inventario[], int total) {
     }
 
     for (int i = 0; i < total; i++) {
-        fprintf(f, "%d;%s;%.2f;%d;%s;%s\n",
+        fprintf(f, "%d;%s;%.2f;%.2f;%s;%s\n",
             inventario[i].id,
             inventario[i].nombre,
             inventario[i].precio,

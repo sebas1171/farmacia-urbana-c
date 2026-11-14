@@ -35,22 +35,81 @@ static const char *normalizarRol(const char *rol) {
         strcasecmp(rol, "ADMINISTRADOR") == 0) {
         return "ADMIN";
     }
-    if (strcasecmp(rol, "VENDEDOR") == 0 ||
-        strcasecmp(rol, "TECNICO") == 0) {
+    if (strcasecmp(rol, "TECNICO") == 0 ||
+        strcasecmp(rol, "TÉCNICO") == 0) {
+        return "TECNICO";
+    }
+    if (strcasecmp(rol, "VENDEDOR") == 0) {
         return "VENDEDOR";
     }
     return NULL;
 }
 
-void listarUsuarios(void) {
+/* Lista el catalogo de sucursales (alimenta el combo del CRUD de usuarios).
+   Contrato: OK;SUCURSAL;<id>;<nombre>;<direccion> */
+void listarSucursales(void) {
     PGconn *conn = conectar();
     if (conn == NULL) {
         return;
     }
 
     PGresult *res = PQexec(conn,
-        "SELECT id, nombre, username, rol FROM usuarios "
-        "WHERE activo = TRUE ORDER BY id ASC");
+        "SELECT id, nombre, direccion FROM sucursal ORDER BY id ASC");
+
+    if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "sucursales SELECT: %s\n", PQerrorMessage(conn));
+        printf("ERROR;consulta_sucursales_fallida\n");
+        if (res != NULL) {
+            PQclear(res);
+        }
+        PQfinish(conn);
+        return;
+    }
+
+    int filas = PQntuples(res);
+    if (filas == 0) {
+        printf("OK;SIN_RESULTADOS\n");
+    } else {
+        for (int i = 0; i < filas; i++) {
+            printf("OK;SUCURSAL;%s;%s;%s\n",
+                   PQgetvalue(res, i, 0),
+                   PQgetvalue(res, i, 1),
+                   PQgetvalue(res, i, 2));
+        }
+    }
+
+    PQclear(res);
+    PQfinish(conn);
+}
+
+/* Lista usuarios activos de todas las sucursales. Los de la sucursal de la
+   sesión se muestran primero. Contrato:
+     OK;<id>;<nombre>;<username>;<rol>;<id_sucursal>;<nombre_sucursal> */
+void listarUsuarios(int id_sucursal) {
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return;
+    }
+
+    PGconn *conn = conectar();
+    if (conn == NULL) {
+        return;
+    }
+
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
+    const char *sql =
+        "SELECT u.id, u.nombre, u.username, u.rol, u.id_sucursal, s.nombre "
+        "FROM usuarios u "
+        "INNER JOIN sucursal s ON s.id = u.id_sucursal "
+        "WHERE u.activo = TRUE "
+        "ORDER BY (u.id_sucursal = $1) DESC, u.id ASC";
+    const Oid paramTypes[] = { 23 };
+    const char *const paramValues[] = { sucursal_txt };
+
+    PGresult *res = PQexecParams(conn, sql, 1, paramTypes, paramValues,
+                                 NULL, NULL, 0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "usuarios SELECT: %s\n", PQerrorMessage(conn));
@@ -67,11 +126,13 @@ void listarUsuarios(void) {
         printf("OK;SIN_RESULTADOS\n");
     } else {
         for (int i = 0; i < filas; i++) {
-            printf("OK;%s;%s;%s;%s\n",
+            printf("OK;%s;%s;%s;%s;%s;%s\n",
                    PQgetvalue(res, i, 0),
                    PQgetvalue(res, i, 1),
                    PQgetvalue(res, i, 2),
-                   PQgetvalue(res, i, 3));
+                   PQgetvalue(res, i, 3),
+                   PQgetvalue(res, i, 4),
+                   PQgetvalue(res, i, 5));
         }
     }
 
@@ -79,16 +140,37 @@ void listarUsuarios(void) {
     PQfinish(conn);
 }
 
+/* Rechaza los caracteres que rompen el contrato IPC (campos ';', líneas). */
+static int campoLimpio(const char *s) {
+    if (s == NULL) {
+        return 0;
+    }
+    for (int i = 0; s[i] != '\0'; i++) {
+        if (s[i] == ';' || s[i] == '\n' || s[i] == '\r') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void crearUsuario(const char *nombre, const char *username,
-                  const char *password, const char *rol) {
+                  const char *password, const char *rol, int id_sucursal) {
     if (nombre == NULL || username == NULL || password == NULL || rol == NULL ||
         nombre[0] == '\0' || username[0] == '\0' || password[0] == '\0') {
         printf("ERROR;Campos_Incompletos\n");
         return;
     }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
+        return;
+    }
     if (strlen(nombre) >= 100 || strlen(username) >= 32 ||
         strlen(password) >= 32) {
         printf("ERROR;Campos_Demasiado_Largos\n");
+        return;
+    }
+    if (!campoLimpio(nombre) || !campoLimpio(username)) {
+        printf("ERROR;Caracteres_Invalidos\n");
         return;
     }
 
@@ -103,12 +185,18 @@ void crearUsuario(const char *nombre, const char *username,
         return;
     }
 
+    char sucursal_txt[16];
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
+
     const char *sql =
-        "INSERT INTO usuarios (username, password, nombre, rol, activo) "
-        "VALUES ($1, $2, $3, $4, TRUE)";
-    const Oid paramTypes[] = { 25, 25, 25, 25 };
-    const char *const paramValues[] = { username, password, nombre, rol_db };
-    PGresult *res = PQexecParams(conn, sql, 4, paramTypes, paramValues,
+        "INSERT INTO usuarios "
+        "(username, password, nombre, rol, activo, id_sucursal) "
+        "VALUES ($1, $2, $3, $4, TRUE, $5)";
+    const Oid paramTypes[] = { 25, 25, 25, 25, 23 };
+    const char *const paramValues[] = {
+        username, password, nombre, rol_db, sucursal_txt
+    };
+    PGresult *res = PQexecParams(conn, sql, 5, paramTypes, paramValues,
                                  NULL, NULL, 0);
 
     if (res == NULL) {
@@ -133,9 +221,13 @@ void crearUsuario(const char *nombre, const char *username,
     PQfinish(conn);
 }
 
-void editarUsuario(int id, const char *rol) {
+void editarUsuario(int id, const char *rol, int id_sucursal) {
     if (id <= 0) {
         printf("ERROR;ID_Invalido\n");
+        return;
+    }
+    if (id_sucursal <= 0) {
+        printf("ERROR;Sucursal_Invalida\n");
         return;
     }
 
@@ -151,13 +243,16 @@ void editarUsuario(int id, const char *rol) {
     }
 
     char id_txt[16];
+    char sucursal_txt[16];
     snprintf(id_txt, sizeof(id_txt), "%d", id);
+    snprintf(sucursal_txt, sizeof(sucursal_txt), "%d", id_sucursal);
 
     const char *sql =
-        "UPDATE usuarios SET rol = $2 WHERE id = $1 AND activo = TRUE";
-    const Oid paramTypes[] = { 23, 25 };
-    const char *const paramValues[] = { id_txt, rol_db };
-    PGresult *res = PQexecParams(conn, sql, 2, paramTypes, paramValues,
+        "UPDATE usuarios SET rol = $2, id_sucursal = $3 "
+        "WHERE id = $1 AND activo = TRUE";
+    const Oid paramTypes[] = { 23, 25, 23 };
+    const char *const paramValues[] = { id_txt, rol_db, sucursal_txt };
+    PGresult *res = PQexecParams(conn, sql, 3, paramTypes, paramValues,
                                  NULL, NULL, 0);
 
     if (res == NULL || PQresultStatus(res) != PGRES_COMMAND_OK) {

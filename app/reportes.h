@@ -36,6 +36,9 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
 
    La fecha se emite como YYYY-MM-DD HH24:MI:SS.MS (con milisegundos).
 
+   Si fecha_inicio y fecha_fin llegan vacias (NULL o ""), NO se aplica el
+   filtro de fechas y se devuelven todas las ventas registradas.
+
    Si no se proporciona un ID de vendedor valido (NULL o vacio), se muestran
    las ventas de todos los vendedores.
 
@@ -49,7 +52,9 @@ int reporteVencimientos(const Producto inventario[], int total, const char *fech
        ERROR;<motivo>
 
    Devuelve la cantidad de filas impresas (0 si no hay resultados). */
-int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, const char *id_vendedor, const char *dni_cliente);
+int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin,
+                           const char *id_vendedor, const char *dni_cliente,
+                           int id_sucursal);
 
 /* Motor de alertas: imprime el resumen de alertas.
 
@@ -61,30 +66,38 @@ int reporteHistorialVentas(const char *fecha_inicio, const char *fecha_fin, cons
               < CURRENT_DATE + INTERVAL '30 days' (vencen en menos de 30 dias).
 
    Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
-int reporteAlertas(void);
-int reporteAlertasStock(void);
-int reporteAlertasVencimientos(void);
+int reporteAlertas(int id_sucursal);
+int reporteAlertasStock(int id_sucursal);
+int reporteAlertasVencimientos(int id_sucursal);
 
 /* Imprime el producto mas vendido en el periodo [fecha_inicio, fecha_fin].
 
    Formato:
        OK;PRODUCTO_MAS_VENDIDO;<codigo>;<nombre>;<cantidad>
 
+   Si fecha_inicio y fecha_fin llegan vacias, se omite el filtro de fechas
+   y se consideran todas las ventas registradas.
+
    Si no hay ventas en el periodo:
        OK;SIN_RESULTADOS
 
    Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
-int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin);
+int reporteProductoMasVendido(const char *fecha_inicio, const char *fecha_fin,
+                              int id_sucursal);
 
 /* Imprime los ingresos totales del periodo [fecha_inicio, fecha_fin].
 
    Formato:
        OK;INGRESOS_TOTALES;<total>
 
-   Los ingresos se calculan con SUM(detalle_ventas.subtotal) y COALESCE para
+   Si fecha_inicio y fecha_fin llegan vacias, se omite el filtro de fechas
+   y se suman todas las ventas registradas.
+
+   Los ingresos se calculan con SUM(detalle_venta.subtotal) y COALESCE para
    evitar errores cuando no hay ventas/detalles.
 
    Devuelve 0 si la consulta fue exitosa, -1 si no lo fue. */
-int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin);
+int reporteIngresosTotales(const char *fecha_inicio, const char *fecha_fin,
+                           int id_sucursal);
 
 #endif

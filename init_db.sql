@@ -25,6 +25,49 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- TOC entry 223 (class 1259 OID 16473)
+-- Name: sucursal; Type: TABLE; Schema: public; Owner: administrador
+--
+-- Modelo multi-local: todas las tablas operativas (usuarios, producto y
+-- venta) pertenecen a una sucursal. El id_sucursal es la llave foranea que
+-- aísla la sesión de cada trabajador.
+--
+
+CREATE TABLE public.sucursal (
+    id integer NOT NULL,
+    nombre character varying(100) NOT NULL,
+    direccion character varying(200) NOT NULL
+);
+
+
+ALTER TABLE public.sucursal OWNER TO administrador;
+
+--
+-- TOC entry 224 (class 1259 OID 16472)
+-- Name: sucursal_id_seq; Type: SEQUENCE; Schema: public; Owner: administrador
+--
+
+CREATE SEQUENCE public.sucursal_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.sucursal_id_seq OWNER TO administrador;
+
+--
+-- TOC entry 3464 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: sucursal_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: administrador
+--
+
+ALTER SEQUENCE public.sucursal_id_seq OWNED BY public.sucursal.id;
+
+
+--
 -- TOC entry 222 (class 1259 OID 16474)
 -- Name: detalle_venta; Type: TABLE; Schema: public; Owner: administrador
 --
@@ -32,7 +75,8 @@ SET default_table_access_method = heap;
 CREATE TABLE public.detalle_venta (
     id_venta integer NOT NULL,
     codigo_producto character varying(13) NOT NULL,
-    cantidad integer NOT NULL,
+    -- Cantidad decimal: permite vender fracciones (ej. 0.5 cajas).
+    cantidad numeric(10,2) NOT NULL,
     subtotal numeric(10,2) NOT NULL
 );
 
@@ -48,7 +92,8 @@ CREATE TABLE public.inventario (
     id integer NOT NULL,
     nombre character varying(100) NOT NULL,
     precio numeric(10,2) NOT NULL,
-    stock integer DEFAULT 0 NOT NULL
+    -- Stock decimal: permite fracciones de cajas/unidades.
+    stock numeric(10,2) DEFAULT 0 NOT NULL
 );
 
 
@@ -87,12 +132,17 @@ ALTER SEQUENCE public.inventario_id_seq OWNED BY public.inventario.id;
 CREATE TABLE public.producto (
     codigo_producto character varying(13) NOT NULL,
     nombre character varying(100) NOT NULL,
+    -- Clasificación comercial del producto (Medicamento, Crema, Jarabe, ...).
+    categoria VARCHAR(50) DEFAULT 'Medicamento',
     precio numeric(10,2) NOT NULL,
-    stock integer DEFAULT 0 NOT NULL,
-    requiere_receta boolean DEFAULT false,
+    -- Stock decimal: permite fracciones de cajas/unidades.
+    stock numeric(10,2) DEFAULT 0 NOT NULL,
+    -- Control de recetas: si es TRUE solo ADMIN puede venderlo sin CMP.
+    requiere_receta BOOLEAN DEFAULT FALSE,
     aplica_igv boolean DEFAULT true,
     lote character varying(50),
-    fecha_vencimiento date
+    fecha_vencimiento date,
+    id_sucursal integer DEFAULT 1 NOT NULL
 );
 
 
@@ -109,7 +159,8 @@ CREATE TABLE public.usuarios (
     password character varying(32) NOT NULL,
     nombre character varying(100) NOT NULL,
     rol character varying(16) NOT NULL,
-    activo boolean DEFAULT true
+    activo boolean DEFAULT true,
+    id_sucursal integer DEFAULT 1 NOT NULL
 );
 
 
@@ -147,10 +198,12 @@ ALTER SEQUENCE public.usuarios_id_seq OWNED BY public.usuarios.id;
 
 CREATE TABLE public.venta (
     id integer NOT NULL,
-    fecha_hora timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    -- Fecha local de Perú (UTC-5), independiente de la zona horaria del contenedor.
+    fecha_hora timestamp without time zone DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima'),
     id_vendedor integer,
     dni_cliente character varying(8),
-    total numeric(10,2) NOT NULL
+    total numeric(10,2) NOT NULL,
+    id_sucursal integer DEFAULT 1 NOT NULL
 );
 
 
@@ -182,6 +235,34 @@ ALTER SEQUENCE public.venta_id_seq OWNED BY public.venta.id;
 
 
 --
+-- TOC entry 225 (class 1259 OID 16475)
+-- Name: auditoria_acciones; Type: TABLE; Schema: public; Owner: administrador
+--
+-- Bitácora de seguridad: registra las ediciones, eliminaciones y ventas
+-- indicando el usuario activo que ejecutó la acción. La fecha se guarda en
+-- hora local de Perú (UTC-5), igual que venta.fecha_hora.
+--
+
+CREATE TABLE public.auditoria_acciones (
+    id serial NOT NULL,
+    usuario character varying(50),
+    accion text,
+    fecha timestamp without time zone DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')
+);
+
+
+ALTER TABLE public.auditoria_acciones OWNER TO administrador;
+
+
+--
+-- TOC entry 3287 (class 2604 OID 16445)
+-- Name: sucursal id; Type: DEFAULT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.sucursal ALTER COLUMN id SET DEFAULT nextval('public.sucursal_id_seq'::regclass);
+
+
+--
 -- TOC entry 3288 (class 2604 OID 16446)
 -- Name: inventario id; Type: DEFAULT; Schema: public; Owner: administrador
 --
@@ -203,6 +284,18 @@ ALTER TABLE ONLY public.usuarios ALTER COLUMN id SET DEFAULT nextval('public.usu
 --
 
 ALTER TABLE ONLY public.venta ALTER COLUMN id SET DEFAULT nextval('public.venta_id_seq'::regclass);
+
+
+--
+-- TOC entry 3461 (class 0 OID 16473)
+-- Dependencies: 223
+-- Data for Name: sucursal; Type: TABLE DATA; Schema: public; Owner: administrador
+--
+
+COPY public.sucursal (id, nombre, direccion) FROM stdin;
+1	Sede Central	Av. Principal 123
+2	Sede Norte	Av. Norte 456
+\.
 
 
 --
@@ -234,10 +327,10 @@ COPY public.inventario (id, nombre, precio, stock) FROM stdin;
 -- Data for Name: producto; Type: TABLE DATA; Schema: public; Owner: administrador
 --
 
-COPY public.producto (codigo_producto, nombre, precio, stock, requiere_receta, aplica_igv, lote, fecha_vencimiento) FROM stdin;
-7751234567890	Paracetamol 500mg	2.50	100	f	t	\N	\N
-7759876543210	Ibuprofeno 400mg	3.00	50	f	t	\N	\N
-7754567890123	Amoxicilina 500mg	5.50	30	f	t	\N	\N
+COPY public.producto (codigo_producto, nombre, categoria, precio, stock, requiere_receta, aplica_igv, lote, fecha_vencimiento, id_sucursal) FROM stdin;
+7751234567890	Paracetamol 500mg	Medicamento	2.50	100	f	t	\N	\N	1
+7759876543210	Ibuprofeno 400mg	Medicamento	3.00	50	f	t	\N	\N	1
+7754567890123	Amoxicilina 500mg	Medicamento	5.50	30	t	t	\N	\N	1
 \.
 
 
@@ -247,9 +340,10 @@ COPY public.producto (codigo_producto, nombre, precio, stock, requiere_receta, a
 -- Data for Name: usuarios; Type: TABLE DATA; Schema: public; Owner: administrador
 --
 
-COPY public.usuarios (id, username, password, nombre, rol, activo) FROM stdin;
-1	admin	admin123	Sebastián Herrera	ADMIN	t
-2	vendedor1	vend123	Paolo Castro	VENDEDOR	t
+COPY public.usuarios (id, username, password, nombre, rol, activo, id_sucursal) FROM stdin;
+1	admin	admin123	Sebastián Herrera	ADMIN	t	1
+2	vendedor1	vend123	Paolo Castro	VENDEDOR	t	1
+3	tecnico1	tecnico123	Carlos Técnico	TECNICO	t	1
 \.
 
 
@@ -259,8 +353,17 @@ COPY public.usuarios (id, username, password, nombre, rol, activo) FROM stdin;
 -- Data for Name: venta; Type: TABLE DATA; Schema: public; Owner: administrador
 --
 
-COPY public.venta (id, fecha_hora, id_vendedor, dni_cliente, total) FROM stdin;
+COPY public.venta (id, fecha_hora, id_vendedor, dni_cliente, total, id_sucursal) FROM stdin;
 \.
+
+
+--
+-- TOC entry 3471 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: sucursal_id_seq; Type: SEQUENCE SET; Schema: public; Owner: administrador
+--
+
+SELECT pg_catalog.setval('public.sucursal_id_seq', 2, true);
 
 
 --
@@ -278,7 +381,7 @@ SELECT pg_catalog.setval('public.inventario_id_seq', 3, true);
 -- Name: usuarios_id_seq; Type: SEQUENCE SET; Schema: public; Owner: administrador
 --
 
-SELECT pg_catalog.setval('public.usuarios_id_seq', 2, true);
+SELECT pg_catalog.setval('public.usuarios_id_seq', 3, true);
 
 
 --
@@ -288,6 +391,24 @@ SELECT pg_catalog.setval('public.usuarios_id_seq', 2, true);
 --
 
 SELECT pg_catalog.setval('public.venta_id_seq', 1, false);
+
+
+--
+-- TOC entry 3310 (class 2606 OID 16475)
+-- Name: sucursal sucursal_pkey; Type: CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.sucursal
+    ADD CONSTRAINT sucursal_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 3311 (class 2606 OID 16476)
+-- Name: sucursal sucursal_nombre_key; Type: CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.sucursal
+    ADD CONSTRAINT sucursal_nombre_key UNIQUE (nombre);
 
 
 --
@@ -345,6 +466,15 @@ ALTER TABLE ONLY public.venta
 
 
 --
+-- TOC entry 3315 (class 2606 OID 16490)
+-- Name: auditoria_acciones auditoria_acciones_pkey; Type: CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.auditoria_acciones
+    ADD CONSTRAINT auditoria_acciones_pkey PRIMARY KEY (id);
+
+
+--
 -- TOC entry 3307 (class 2606 OID 16484)
 -- Name: detalle_venta detalle_venta_codigo_producto_fkey; Type: FK CONSTRAINT; Schema: public; Owner: administrador
 --
@@ -369,6 +499,33 @@ ALTER TABLE ONLY public.detalle_venta
 
 ALTER TABLE ONLY public.venta
     ADD CONSTRAINT venta_id_vendedor_fkey FOREIGN KEY (id_vendedor) REFERENCES public.usuarios(id);
+
+
+--
+-- TOC entry 3312 (class 2606 OID 16477)
+-- Name: producto producto_id_sucursal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.producto
+    ADD CONSTRAINT producto_id_sucursal_fkey FOREIGN KEY (id_sucursal) REFERENCES public.sucursal(id);
+
+
+--
+-- TOC entry 3313 (class 2606 OID 16480)
+-- Name: usuarios usuarios_id_sucursal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.usuarios
+    ADD CONSTRAINT usuarios_id_sucursal_fkey FOREIGN KEY (id_sucursal) REFERENCES public.sucursal(id);
+
+
+--
+-- TOC entry 3314 (class 2606 OID 16481)
+-- Name: venta venta_id_sucursal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: administrador
+--
+
+ALTER TABLE ONLY public.venta
+    ADD CONSTRAINT venta_id_sucursal_fkey FOREIGN KEY (id_sucursal) REFERENCES public.sucursal(id);
 
 
 -- Completed on 2026-11-11 19:22:18 UTC

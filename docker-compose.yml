@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.15
     container_name: farmacia_postgres_final
     restart: always
     environment:
@@ -11,6 +11,14 @@ services:
       - "5433:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      # init_db.sql se ejecuta SOLO cuando el volumen db_data está vacío.
+      - ../init_db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./init_db_indexes.sql:/docker-entrypoint-initdb.d/02-indexes.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U administrador -d bd_farmacia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   pgadmin:
     image: dpage/pgadmin4
@@ -22,7 +30,8 @@ services:
     ports:
       - "5050:80"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   db_data:
