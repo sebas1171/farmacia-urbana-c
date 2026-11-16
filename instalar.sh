@@ -1,6 +1,9 @@
 #!/bin/bash
 echo "🚀 Iniciando despliegue automático de Farmacia Urbana..."
 
+# Pequeña pausa para asegurar que el sistema de archivos registre todo el repositorio clonado
+sleep 2
+
 echo "📦 1. Levantando base de datos en Docker..."
 sudo docker compose up -d
 
