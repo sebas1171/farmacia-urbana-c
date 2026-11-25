@@ -5,7 +5,7 @@ echo "🚀 Iniciando despliegue automático de Farmacia Urbana..."
 sleep 2
 
 echo "📦 1. Levantando base de datos en Docker..."
-sudo docker compose up -d
+docker compose up -d
 
 echo "🛠️ 2. Instalando dependencias de C y Python..."
 sudo apt update > /dev/null 2>&1
